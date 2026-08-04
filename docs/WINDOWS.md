@@ -25,7 +25,7 @@
 - 工作目录、thread 和三档权限模式沿用跨平台实现。
 - STOP 只终止当前应用持有的子进程，不调用全局 `taskkill`。
 - Voice 网络瞬断最多自动重连三次；用户 STOP、权限错误和非网络错误不会触发无限重试。
-- release 主程序和唤醒器使用 Windows GUI 子系统，不显示日志控制台。
+- release 主程序和唤醒器使用 Windows GUI 子系统；Codex app-server 子进程使用 `CREATE_NO_WINDOW`，不显示 Windows Terminal 日志窗口。
 - Windows 安装包使用 NSIS。
 
 Windows Voice 与唤醒词仍必须在真实麦克风、已登录的 Codex 和支持 realtime conversation 的 Codex 版本上验证。自动化构建不能代替这些实机项目。

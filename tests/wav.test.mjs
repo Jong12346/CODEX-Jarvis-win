@@ -101,6 +101,21 @@ test("permission profiles are persisted and mapped by the trusted backend", () =
   assert.match(backend, /existing\.permission_mode == permission_mode/);
 });
 
+test("Mandarin and Shaanxi speech styles persist and rebuild the Voice runtime", () => {
+  assert.match(frontend, /type SpeechStyle = "mandarin" \| "shaanxi"/);
+  assert.match(frontend, /jarvis\.speechStyle/);
+  assert.match(frontend, /name="speech-style"/);
+  assert.match(frontend, /speechStyle,/);
+  assert.match(frontend, /speechStyleChanged/);
+  assert.match(frontend, /resumeVoiceAfterSave/);
+  assert.match(frontend, /await startDirectVoice\(\)/);
+  assert.match(backend, /enum SpeechStyle/);
+  assert.match(backend, /Self::Shaanxi/);
+  assert.match(backend, /Shaanxi dialect style/);
+  assert.match(backend, /existing\.speech_style == speech_style/);
+  assert.match(backend, /speech_style\.instructions\(\)/);
+});
+
 test("wake activates the macOS app before focusing the Jarvis window", () => {
   assert.match(backend, /fn raise_jarvis_window/);
   assert.match(backend, /activateIgnoringOtherApps\(true\)/);
@@ -160,6 +175,8 @@ test("a second desktop launch raises the existing Jarvis runtime", () => {
 
 test("Windows release runs as a GUI application without a console window", () => {
   assert.match(rustMain, /windows_subsystem = "windows"/);
+  assert.match(backend, /Windows Terminal opens behind the transparent Jarvis window/);
+  assert.match(backend, /command\.creation_flags\(CREATE_NO_WINDOW\)/);
 });
 
 test("transient realtime network resets use bounded automatic reconnect", () => {

@@ -90,6 +90,7 @@ struct CodexRuntime {
     voice_phase: RwLock<String>,
     realtime_session_id: RwLock<Option<String>>,
     permission_mode: PermissionMode,
+    speech_style: SpeechStyle,
     workspace: String,
     codex_binary: PathBuf,
 }
@@ -100,6 +101,23 @@ enum PermissionMode {
     Safe,
     Auto,
     Full,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum SpeechStyle {
+    #[default]
+    Mandarin,
+    Shaanxi,
+}
+
+impl SpeechStyle {
+    fn instructions(self) -> &'static str {
+        match self {
+            Self::Mandarin => "Reply in the user's language. When speaking Chinese, use clear, natural Standard Mandarin.",
+            Self::Shaanxi => "Reply in the user's language. When speaking Chinese, use a friendly, natural Shaanxi dialect style with recognizable Guanzhong phrasing and a light Shaanxi accent. Keep technical terms, code, commands, paths, names, numbers, and safety warnings exact. Prioritize clarity over caricature, and do not claim the accent is an authentic local recording.",
+        }
+    }
 }
 
 struct PermissionProfile {
@@ -154,6 +172,8 @@ struct StartCodexVoiceRequest {
     cwd: String,
     thread_id: Option<String>,
     permission_mode: PermissionMode,
+    #[serde(default)]
+    speech_style: SpeechStyle,
     codex_path: Option<String>,
     sdp: String,
     voice: Option<String>,
@@ -201,6 +221,7 @@ impl CodexRuntime {
     async fn spawn(
         app: AppHandle,
         permission_mode: PermissionMode,
+        speech_style: SpeechStyle,
         workspace: String,
         codex_binary: PathBuf,
     ) -> Result<Arc<Self>, String> {
@@ -214,7 +235,13 @@ impl CodexRuntime {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(target_os = "windows")]
-        apply_windows_proxy(&mut command);
+        {
+            // The npm Codex binary is a console executable. Without this,
+            // Windows Terminal opens behind the transparent Jarvis window.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+            apply_windows_proxy(&mut command);
+        }
         let mut child = command
             .spawn()
             .map_err(|error| format!("无法启动 codex app-server：{error}"))?;
@@ -232,6 +259,7 @@ impl CodexRuntime {
             voice_phase: RwLock::new("standby".to_owned()),
             realtime_session_id: RwLock::new(None),
             permission_mode,
+            speech_style,
             workspace,
             codex_binary,
         });
@@ -932,6 +960,7 @@ async fn ensure_runtime(
     cwd: &str,
     resume_thread_id: Option<&str>,
     permission_mode: PermissionMode,
+    speech_style: SpeechStyle,
     selected_codex_binary: Option<&str>,
 ) -> Result<Arc<CodexRuntime>, String> {
     let cwd = validated_workspace(cwd)?;
@@ -939,6 +968,7 @@ async fn ensure_runtime(
     let existing = { state.runtime.lock().await.clone() };
     if let Some(existing) = existing {
         if existing.permission_mode == permission_mode
+            && existing.speech_style == speech_style
             && existing.workspace == cwd
             && existing.codex_binary == codex_binary
         {
@@ -947,7 +977,14 @@ async fn ensure_runtime(
         terminate_runtime(state).await?;
     }
     let profile = permission_mode.profile();
-    let runtime = CodexRuntime::spawn(app, permission_mode, cwd.clone(), codex_binary).await?;
+    let runtime = CodexRuntime::spawn(
+        app,
+        permission_mode,
+        speech_style,
+        cwd.clone(),
+        codex_binary,
+    )
+    .await?;
     runtime.request("initialize", json!({
         "clientInfo": {"name": "jarvis-codex", "title": "Jarvis Codex", "version": env!("CARGO_PKG_VERSION")},
         "capabilities": {"experimentalApi": true}
@@ -958,7 +995,8 @@ async fn ensure_runtime(
         "approvalPolicy": profile.approval_policy,
         "sandbox": profile.sandbox,
         "baseInstructions": format!(
-            "You are Codex speaking through the local Jarvis interface. Keep voice replies concise and natural, execute real tasks with Codex tools when asked, report progress while work continues, and accept spoken corrections in the same thread. {}",
+            "You are Codex speaking through the local Jarvis interface. Keep voice replies concise and natural, execute real tasks with Codex tools when asked, report progress while work continues, and accept spoken corrections in the same thread. {} {}",
+            speech_style.instructions(),
             profile.instructions
         )
     });
@@ -996,6 +1034,7 @@ async fn start_jarvis(
     cwd: String,
     thread_id: Option<String>,
     permission_mode: PermissionMode,
+    speech_style: Option<SpeechStyle>,
     codex_path: Option<String>,
 ) -> Result<SessionInfo, String> {
     let runtime = ensure_runtime(
@@ -1004,6 +1043,7 @@ async fn start_jarvis(
         &cwd,
         thread_id.as_deref(),
         permission_mode,
+        speech_style.unwrap_or_default(),
         codex_path.as_deref(),
     )
     .await?;
@@ -1021,6 +1061,7 @@ async fn start_codex_voice(
         cwd,
         thread_id,
         permission_mode,
+        speech_style,
         codex_path,
         sdp,
         voice,
@@ -1034,6 +1075,7 @@ async fn start_codex_voice(
         &cwd,
         thread_id.as_deref(),
         permission_mode,
+        speech_style,
         codex_path.as_deref(),
     )
     .await?;

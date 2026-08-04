@@ -192,6 +192,7 @@ Voice 回报结果。
 - 确认、授权、完成和异常四类沟通动作反馈
 - 原生 AVFoundation 权限预检和 Hardened Runtime 音频 entitlement
 - WebRTC 麦克风输入、实时音频输出和字幕
+- 普通话 / 陕西话语音风格开关；切换时重建 Voice，方言效果以实际模型输出为准
 - `thread/realtime/start` V3 直连 Codex Voice
 - Voice 自动调用 Codex 完成真实任务并继续语音回报
 - STOP 终止 Voice、抑制 transcript tail，并中断晚到的 turn

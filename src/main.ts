@@ -25,6 +25,7 @@ type WakeEvent = {
   cold?: boolean;
 };
 type PermissionMode = "safe" | "auto" | "full";
+type SpeechStyle = "mandarin" | "shaanxi";
 
 const state = {
   mode: "booting" as Mode,
@@ -40,17 +41,26 @@ const WORKSPACE_KEY = "jarvis.workspace";
 const THREAD_KEY_PREFIX = "jarvis.threadId:";
 const PERMISSION_KEY = "jarvis.permissionMode";
 const CODEX_BINARY_KEY = "jarvis.codexBinary";
+const SPEECH_STYLE_KEY = "jarvis.speechStyle";
 const permissionLabels: Record<PermissionMode, string> = {
   safe: "安全模式 · 需要时确认",
   auto: "自动办公 · 当前目录自主执行",
   full: "完全访问 · 高风险",
 };
+const speechStyleLabels: Record<SpeechStyle, string> = {
+  mandarin: "普通话 · 清晰自然",
+  shaanxi: "陕西话 · 方言风格",
+};
 function storedPermissionMode(): PermissionMode {
   const value = localStorage.getItem(PERMISSION_KEY);
   return value === "safe" || value === "full" ? value : "auto";
 }
+function storedSpeechStyle(): SpeechStyle {
+  return localStorage.getItem(SPEECH_STYLE_KEY) === "shaanxi" ? "shaanxi" : "mandarin";
+}
 let workspace = "";
 let permissionMode = storedPermissionMode();
+let speechStyle = storedSpeechStyle();
 let codexBinary = localStorage.getItem(CODEX_BINARY_KEY) ?? "";
 const savedThreadId = () => localStorage.getItem(`${THREAD_KEY_PREFIX}${workspace}`);
 let peer: RTCPeerConnection | null = null;
@@ -130,7 +140,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   </footer>
   <div id="degraded-banner" class="degraded-banner" hidden><b>JARVIS NEEDS PERMISSION</b><span id="degraded-copy">首次使用请允许麦克风和语音识别。</span></div>
   <dialog id="approval"><h2>高风险操作确认</h2><p id="approval-copy">Codex 请求执行需要确认的动作。</p><div><button id="deny">拒绝</button><button id="approve">允许一次</button></div></dialog>
-  <dialog id="settings-dialog"><h2>JARVIS SYSTEM</h2><dl><dt>Wake phrase</dt><dd>嗨 Jarvis / Hey Jarvis</dd><dt>Wake listener</dt><dd id="wake-auth">检测中</dd><dt>Codex thread</dt><dd id="thread-id">—</dd><dt>Workspace</dt><dd id="workspace">—</dd><dt>Permission</dt><dd id="permission-mode-label">—</dd><dt>Voice kernel</dt><dd id="voice-auth">检测中</dd></dl><label class="workspace-setting">工作目录<input id="workspace-setting" autocomplete="off" spellcheck="false"></label><label class="workspace-setting">Codex 可执行文件（可选）<input id="codex-binary-setting" autocomplete="off" spellcheck="false" placeholder="自动查找，或填写 codex.exe 的完整路径"></label><fieldset class="permission-setting"><legend>Codex 操作权限</legend><label><input type="radio" name="permission-mode" value="safe"><span><b>安全模式</b><small>超出当前目录或高风险操作时询问</small></span></label><label class="recommended"><input type="radio" name="permission-mode" value="auto"><span><b>自动办公</b><small>当前目录内自主执行，越界操作直接阻止</small></span><em>推荐</em></label><label class="danger"><input type="radio" name="permission-mode" value="full"><span><b>完全访问</b><small>不限制目录且不询问，请谨慎使用</small></span></label></fieldset><p>权限、工作目录或 Codex 路径切换会停止当前任务并重建运行时。</p><p>工作目录保存后立即生效；每个目录会续接自己的 Codex thread。</p><p>“新开线程”会结束当前任务并创建一个全新的 Codex thread；原线程仍保留在 Codex 历史记录中。</p><p>唤醒词在本机识别；Jarvis 页面通过 Codex app-server V3 WebRTC 进入官方 Voice 线程。认证复用本机 Codex 登录，不读取凭据、不模拟点击，也不建立第二套 GPT-Live。</p><div class="settings-actions"><button id="new-thread" class="new-thread">＋ 新开线程</button><span></span><button id="save-settings">保存</button><button id="close-settings">关闭</button></div></dialog>
+  <dialog id="settings-dialog"><h2>JARVIS SYSTEM</h2><dl><dt>Wake phrase</dt><dd>嗨 Jarvis / Hey Jarvis</dd><dt>Wake listener</dt><dd id="wake-auth">检测中</dd><dt>Codex thread</dt><dd id="thread-id">—</dd><dt>Workspace</dt><dd id="workspace">—</dd><dt>Permission</dt><dd id="permission-mode-label">—</dd><dt>Voice style</dt><dd id="speech-style-label">—</dd><dt>Voice kernel</dt><dd id="voice-auth">检测中</dd></dl><label class="workspace-setting">工作目录<input id="workspace-setting" autocomplete="off" spellcheck="false"></label><label class="workspace-setting">Codex 可执行文件（可选）<input id="codex-binary-setting" autocomplete="off" spellcheck="false" placeholder="自动查找，或填写 codex.exe 的完整路径"></label><fieldset class="permission-setting"><legend>Codex 操作权限</legend><label><input type="radio" name="permission-mode" value="safe"><span><b>安全模式</b><small>超出当前目录或高风险操作时询问</small></span></label><label class="recommended"><input type="radio" name="permission-mode" value="auto"><span><b>自动办公</b><small>当前目录内自主执行，越界操作直接阻止</small></span><em>推荐</em></label><label class="danger"><input type="radio" name="permission-mode" value="full"><span><b>完全访问</b><small>不限制目录且不询问，请谨慎使用</small></span></label></fieldset><fieldset class="permission-setting speech-style-setting"><legend>语音风格</legend><label><input type="radio" name="speech-style" value="mandarin"><span><b>普通话</b><small>清晰、中性，默认风格</small></span></label><label><input type="radio" name="speech-style" value="shaanxi"><span><b>陕西话</b><small>使用自然的陕西方言措辞和口音，实际效果可能有差异</small></span></label></fieldset><p>权限、工作目录、Codex 路径或语音风格切换会停止当前任务并重建运行时。</p><p>正在通话时切换语音风格，保存后会自动重连 Voice；语音风格只影响表达方式，不改变任务权限。</p><p>工作目录保存后立即生效；每个目录会续接自己的 Codex thread。</p><p>“新开线程”会结束当前任务并创建一个全新的 Codex thread；原线程仍保留在 Codex 历史记录中。</p><p>唤醒词在本机识别；Jarvis 页面通过 Codex app-server V3 WebRTC 进入官方 Voice 线程。认证复用本机 Codex 登录，不读取凭据、不模拟点击，也不建立第二套 GPT-Live。</p><div class="settings-actions"><button id="new-thread" class="new-thread">＋ 新开线程</button><span></span><button id="save-settings">保存</button><button id="close-settings">关闭</button></div></dialog>
 </main>`;
 
 const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
@@ -824,6 +834,7 @@ async function startDirectVoice(
         cwd: workspace,
         threadId: savedThreadId(),
         permissionMode,
+        speechStyle,
         codexPath: codexBinary || null,
         sdp,
         voice: "cove",
@@ -913,6 +924,7 @@ $("#command-form").addEventListener("submit", async (event) => {
       cwd: workspace,
       threadId: savedThreadId(),
       permissionMode,
+      speechStyle,
       codexPath: codexBinary || null,
     });
     localStorage.setItem(`${THREAD_KEY_PREFIX}${workspace}`, state.session.threadId);
@@ -945,10 +957,18 @@ function syncPermissionControls() {
   if (input) input.checked = true;
   $("#permission-mode-label").textContent = permissionLabels[permissionMode];
 }
+function syncSpeechStyleControls() {
+  const input = document.querySelector<HTMLInputElement>(
+    `input[name="speech-style"][value="${speechStyle}"]`,
+  );
+  if (input) input.checked = true;
+  $("#speech-style-label").textContent = speechStyleLabels[speechStyle];
+}
 
 $("#settings").addEventListener("click", () => {
   ($("#codex-binary-setting") as HTMLInputElement).value = codexBinary;
   syncPermissionControls();
+  syncSpeechStyleControls();
   settings.showModal();
 });
 $("#close-settings").addEventListener("click", () => settings.close());
@@ -968,6 +988,7 @@ $("#new-thread").addEventListener("click", async () => {
       cwd: workspace,
       threadId: null,
       permissionMode,
+      speechStyle,
       codexPath: codexBinary || null,
     });
     state.session = freshSession;
@@ -1007,10 +1028,17 @@ $("#save-settings").addEventListener("click", async () => {
     'input[name="permission-mode"]:checked',
   )?.value as PermissionMode | undefined;
   const nextPermission = selectedPermission ?? permissionMode;
+  const selectedSpeechStyle = document.querySelector<HTMLInputElement>(
+    'input[name="speech-style"]:checked',
+  )?.value as SpeechStyle | undefined;
+  const nextSpeechStyle = selectedSpeechStyle ?? speechStyle;
   const nextCodexBinary = ($("#codex-binary-setting") as HTMLInputElement).value.trim();
   const workspaceChanged = nextWorkspace !== workspace;
+  const speechStyleChanged = nextSpeechStyle !== speechStyle;
+  const resumeVoiceAfterSave = speechStyleChanged && Boolean(state.directVoice?.voiceActive || peer);
   const runtimeChanged = workspaceChanged
     || nextPermission !== permissionMode
+    || speechStyleChanged
     || nextCodexBinary !== codexBinary;
   if (workspaceChanged) {
     localStorage.setItem(WORKSPACE_KEY, nextWorkspace);
@@ -1027,15 +1055,25 @@ $("#save-settings").addEventListener("click", async () => {
     await invoke("shutdown");
     permissionMode = nextPermission;
     localStorage.setItem(PERMISSION_KEY, permissionMode);
+    speechStyle = nextSpeechStyle;
+    localStorage.setItem(SPEECH_STYLE_KEY, speechStyle);
     codexBinary = nextCodexBinary;
     if (codexBinary) localStorage.setItem(CODEX_BINARY_KEY, codexBinary);
     else localStorage.removeItem(CODEX_BINARY_KEY);
     state.session = null;
     state.directVoice = null;
     syncPermissionControls();
+    syncSpeechStyleControls();
     setMode("ready");
-    response.textContent = `运行设置已保存（${permissionLabels[permissionMode]}），下一次任务将在所选目录续接 Codex thread。`;
-    await armWakeListener();
+    response.textContent = `运行设置已保存（${permissionLabels[permissionMode]}；${speechStyleLabels[speechStyle]}）。`;
+    if (resumeVoiceAfterSave) {
+      response.textContent += " 正在使用新的语音风格重连 Voice…";
+      await sleep(250);
+      await startDirectVoice();
+    } else {
+      response.textContent += " 下一次任务将在所选目录续接 Codex thread。";
+      await armWakeListener();
+    }
   }
   settings.close();
 });
@@ -1053,6 +1091,7 @@ if (currentWindow) {
     ($("#workspace-setting") as HTMLInputElement).value = workspace;
     ($("#codex-binary-setting") as HTMLInputElement).value = codexBinary;
     syncPermissionControls();
+    syncSpeechStyleControls();
     setWorker("orchestrator", "Wake word starting");
     setMode("ready");
     const backgroundStart = await invoke<boolean>("startup_is_background");

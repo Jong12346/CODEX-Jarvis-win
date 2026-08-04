@@ -23,7 +23,7 @@
 - Windows“已安装的应用”注册项指向用户安装目录及其卸载器
 - 已安装版本从用户安装目录冷启动，窗口标题、前台句柄和响应状态正常
 - 单实例实机验证：第二次启动自动退出并唤起原窗口，只保留一个 Jarvis runtime
-- 主程序和 Windows 唤醒器均为 Windows GUI PE，release 启动不再出现日志控制台
+- 主程序和 Windows 唤醒器均为 Windows GUI PE；npm Codex app-server 使用 `CREATE_NO_WINDOW`，release/Voice 启动不再出现 Windows Terminal 日志窗口
 - Voice 对连接重置、缺少 TLS closing handshake 和超时进行最多三次递增退避重连；STOP 会抑制重连
 - 目标中文路径立即生效；文字任务在该目录读取 `package.json` 并返回项目名 `jarvis-codex`
 - Voice transcript、Voice 内文字任务、工具调用和完成事件进入同一个 Codex thread

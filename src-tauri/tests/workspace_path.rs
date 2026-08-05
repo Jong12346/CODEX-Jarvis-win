@@ -33,8 +33,8 @@ fn fixture() -> Value {
         env!("CARGO_MANIFEST_DIR"),
         "/../tests/fixtures/workspace-path-vectors.json"
     );
-    let raw = std::fs::read_to_string(path)
-        .unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
+    let raw =
+        std::fs::read_to_string(path).unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
     serde_json::from_str(&raw).expect("fixture is not valid JSON")
 }
 
@@ -215,7 +215,10 @@ fn the_extended_length_prefix_never_escapes_into_an_id() {
     let data = fixture();
     let platform = Platform::Windows;
     let probe = FixtureProbe::new(&data["windows"], platform);
-    for class in data["windows"]["equivalence"].as_array().expect("equivalence") {
+    for class in data["windows"]["equivalence"]
+        .as_array()
+        .expect("equivalence")
+    {
         for input in class["inputs"].as_array().expect("inputs") {
             let input = input.as_str().expect("input");
             let resolved = canonicalize_workspace(input, platform, &probe).expect("resolves");

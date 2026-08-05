@@ -6,6 +6,13 @@ import "./style.css";
 type Mode = "booting" | "ready" | "voice-starting" | "listening" | "working" | "speaking" | "degraded" | "stopped";
 type Message = { id?: number | string; method?: string; params?: any };
 type Session = { threadId: string; cwd: string };
+type WorkspaceInfo = {
+  id: string;
+  display: string;
+  threadKey: string;
+  sourceThreadKey: string;
+  legacyThreadKeys: string[];
+};
 type DirectVoice = {
   codexConnected: boolean;
   voiceActive: boolean;
@@ -38,7 +45,8 @@ const state = {
 };
 
 const WORKSPACE_KEY = "jarvis.workspace";
-const THREAD_KEY_PREFIX = "jarvis.threadId:";
+const THREAD_MIGRATION_BACKUP_PREFIX = "jarvis.threadMigrationBackup.v1:";
+const THREAD_MIGRATION_MARKER_PREFIX = "jarvis.threadMigration.v1:";
 const PERMISSION_KEY = "jarvis.permissionMode";
 const CODEX_BINARY_KEY = "jarvis.codexBinary";
 const SPEECH_STYLE_KEY = "jarvis.speechStyle";
@@ -58,11 +66,48 @@ function storedPermissionMode(): PermissionMode {
 function storedSpeechStyle(): SpeechStyle {
   return localStorage.getItem(SPEECH_STYLE_KEY) === "shaanxi" ? "shaanxi" : "mandarin";
 }
-let workspace = "";
+let workspace: WorkspaceInfo = {
+  id: "",
+  display: "",
+  threadKey: "",
+  sourceThreadKey: "",
+  legacyThreadKeys: [],
+};
 let permissionMode = storedPermissionMode();
 let speechStyle = storedSpeechStyle();
 let codexBinary = localStorage.getItem(CODEX_BINARY_KEY) ?? "";
-const savedThreadId = () => localStorage.getItem(`${THREAD_KEY_PREFIX}${workspace}`);
+const savedThreadId = () => workspace.threadKey
+  ? localStorage.getItem(workspace.threadKey)
+  : null;
+
+function migrateWorkspaceThreadKeys(info: WorkspaceInfo): string | null {
+  const markerKey = `${THREAD_MIGRATION_MARKER_PREFIX}${info.id}`;
+  if (localStorage.getItem(markerKey) === "1") return null;
+
+  const candidateKeys = Array.from(new Set([
+    info.sourceThreadKey,
+    info.threadKey,
+    ...info.legacyThreadKeys,
+  ].filter(Boolean)));
+  const entries = candidateKeys.flatMap((key) => {
+    const threadId = localStorage.getItem(key);
+    return threadId ? [{ key, threadId }] : [];
+  });
+  if (entries.length > 0) {
+    const backupKey = `${THREAD_MIGRATION_BACKUP_PREFIX}${info.id}`;
+    localStorage.setItem(backupKey, JSON.stringify({ schemaVersion: 1, entries }));
+    const preferred = entries.find(({ key }) => key === info.sourceThreadKey)
+      ?? entries.find(({ key }) => key === info.threadKey)
+      ?? entries[0];
+    localStorage.setItem(info.threadKey, preferred.threadId);
+  }
+  localStorage.setItem(markerKey, "1");
+
+  const distinctThreadIds = new Set(entries.map(({ threadId }) => threadId));
+  return distinctThreadIds.size > 1
+    ? "检测到这个工作目录存在多个历史线程。当前线程已续接，其他 thread id 已备份且旧记录未删除。"
+    : null;
+}
 let peer: RTCPeerConnection | null = null;
 let microphoneStream: MediaStream | null = null;
 let remoteStream: MediaStream | null = null;
@@ -517,9 +562,9 @@ function updateVoiceInfo(info: DirectVoice) {
     ? `${info.protocol} · ${info.voiceActive ? "connected" : info.phase}`
     : `${info.protocol} · standby`;
   if (info.threadId) {
-    state.session = { threadId: info.threadId, cwd: workspace };
+    state.session = { threadId: info.threadId, cwd: workspace.id };
     $("#thread-id").textContent = info.threadId;
-    localStorage.setItem(`${THREAD_KEY_PREFIX}${workspace}`, info.threadId);
+    localStorage.setItem(workspace.threadKey, info.threadId);
   }
 }
 
@@ -831,7 +876,7 @@ async function startDirectVoice(
 
     const info = await invoke<DirectVoice>("start_codex_voice", {
       request: {
-        cwd: workspace,
+        cwd: workspace.id,
         threadId: savedThreadId(),
         permissionMode,
         speechStyle,
@@ -921,13 +966,13 @@ $("#command-form").addEventListener("submit", async (event) => {
   }
   if (!state.session) {
     state.session = await invoke<Session>("start_jarvis", {
-      cwd: workspace,
+      cwd: workspace.id,
       threadId: savedThreadId(),
       permissionMode,
       speechStyle,
       codexPath: codexBinary || null,
     });
-    localStorage.setItem(`${THREAD_KEY_PREFIX}${workspace}`, state.session.threadId);
+    localStorage.setItem(workspace.threadKey, state.session.threadId);
     $("#thread-id").textContent = state.session.threadId;
     $("#workspace").textContent = state.session.cwd;
   }
@@ -985,7 +1030,7 @@ $("#new-thread").addEventListener("click", async () => {
     try { await invoke("stop_all"); } catch { /* no active runtime */ }
     await invoke("shutdown");
     const freshSession = await invoke<Session>("start_jarvis", {
-      cwd: workspace,
+      cwd: workspace.id,
       threadId: null,
       permissionMode,
       speechStyle,
@@ -993,7 +1038,7 @@ $("#new-thread").addEventListener("click", async () => {
     });
     state.session = freshSession;
     state.directVoice = null;
-    localStorage.setItem(`${THREAD_KEY_PREFIX}${workspace}`, freshSession.threadId);
+    localStorage.setItem(workspace.threadKey, freshSession.threadId);
     $("#thread-id").textContent = freshSession.threadId;
     $("#workspace").textContent = freshSession.cwd;
     userTranscriptBuffer = "";
@@ -1017,9 +1062,9 @@ $("#new-thread").addEventListener("click", async () => {
 $("#save-settings").addEventListener("click", async () => {
   const requestedWorkspace = ($("#workspace-setting") as HTMLInputElement).value.trim();
   if (!requestedWorkspace) return;
-  let nextWorkspace: string;
+  let nextWorkspace: WorkspaceInfo;
   try {
-    nextWorkspace = await invoke<string>("validate_workspace", { cwd: requestedWorkspace });
+    nextWorkspace = await invoke<WorkspaceInfo>("validate_workspace", { cwd: requestedWorkspace });
   } catch (error) {
     response.textContent = `工作目录无效：${String(error)}`;
     return;
@@ -1033,17 +1078,20 @@ $("#save-settings").addEventListener("click", async () => {
   )?.value as SpeechStyle | undefined;
   const nextSpeechStyle = selectedSpeechStyle ?? speechStyle;
   const nextCodexBinary = ($("#codex-binary-setting") as HTMLInputElement).value.trim();
-  const workspaceChanged = nextWorkspace !== workspace;
+  const workspaceChanged = nextWorkspace.id !== workspace.id;
   const speechStyleChanged = nextSpeechStyle !== speechStyle;
   const resumeVoiceAfterSave = speechStyleChanged && Boolean(state.directVoice?.voiceActive || peer);
   const runtimeChanged = workspaceChanged
     || nextPermission !== permissionMode
     || speechStyleChanged
     || nextCodexBinary !== codexBinary;
+  let workspaceMigrationNotice: string | null = null;
   if (workspaceChanged) {
-    localStorage.setItem(WORKSPACE_KEY, nextWorkspace);
+    workspaceMigrationNotice = migrateWorkspaceThreadKeys(nextWorkspace);
+    localStorage.setItem(WORKSPACE_KEY, nextWorkspace.id);
     workspace = nextWorkspace;
-    $("#workspace").textContent = workspace;
+    $("#workspace").textContent = workspace.display;
+    ($("#workspace-setting") as HTMLInputElement).value = workspace.display;
     $("#thread-id").textContent = savedThreadId() ?? "Not started";
   }
   if (runtimeChanged) {
@@ -1066,6 +1114,7 @@ $("#save-settings").addEventListener("click", async () => {
     syncSpeechStyleControls();
     setMode("ready");
     response.textContent = `运行设置已保存（${permissionLabels[permissionMode]}；${speechStyleLabels[speechStyle]}）。`;
+    if (workspaceMigrationNotice) response.textContent += ` ${workspaceMigrationNotice}`;
     if (resumeVoiceAfterSave) {
       response.textContent += " 正在使用新的语音风格重连 Voice…";
       await sleep(250);
@@ -1083,15 +1132,19 @@ for (const [selector, approved] of [["#approve", true], ["#deny", false]] as con
 
 if (currentWindow) {
   try {
-    workspace = localStorage.getItem(WORKSPACE_KEY)
-      ?? await invoke<string>("default_workspace");
-    localStorage.setItem(WORKSPACE_KEY, workspace);
-    $("#thread-id").textContent = "Not started";
-    $("#workspace").textContent = workspace;
-    ($("#workspace-setting") as HTMLInputElement).value = workspace;
+    const storedWorkspace = localStorage.getItem(WORKSPACE_KEY);
+    workspace = storedWorkspace
+      ? await invoke<WorkspaceInfo>("validate_workspace", { cwd: storedWorkspace })
+      : await invoke<WorkspaceInfo>("default_workspace");
+    const migrationNotice = migrateWorkspaceThreadKeys(workspace);
+    localStorage.setItem(WORKSPACE_KEY, workspace.id);
+    $("#thread-id").textContent = savedThreadId() ?? "Not started";
+    $("#workspace").textContent = workspace.display;
+    ($("#workspace-setting") as HTMLInputElement).value = workspace.display;
     ($("#codex-binary-setting") as HTMLInputElement).value = codexBinary;
     syncPermissionControls();
     syncSpeechStyleControls();
+    if (migrationNotice) response.textContent = migrationNotice;
     setWorker("orchestrator", "Wake word starting");
     setMode("ready");
     const backgroundStart = await invoke<boolean>("startup_is_background");
@@ -1111,10 +1164,16 @@ if (currentWindow) {
     }
   } catch (error) { setMode("stopped"); response.textContent = `启动失败：${String(error)}`; }
 } else {
-  workspace = "Visual preview · native systems disconnected";
+  workspace = {
+    id: "Visual preview · native systems disconnected",
+    display: "Visual preview · native systems disconnected",
+    threadKey: "",
+    sourceThreadKey: "",
+    legacyThreadKeys: [],
+  };
   $("#thread-id").textContent = "Preview only";
-  $("#workspace").textContent = workspace;
-  ($("#workspace-setting") as HTMLInputElement).value = workspace;
+  $("#workspace").textContent = workspace.display;
+  ($("#workspace-setting") as HTMLInputElement).value = workspace.display;
   ($("#codex-binary-setting") as HTMLInputElement).value = codexBinary;
   $("#wake-auth").textContent = "Preview · not connected";
   $("#voice-auth").textContent = "Preview · not connected";

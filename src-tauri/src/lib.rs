@@ -18,6 +18,17 @@ use tokio::{
     time::{timeout, Duration},
 };
 
+mod workspace;
+
+#[doc(hidden)]
+pub use workspace::{
+    canonicalize_workspace, normalize_workspace_path, workspace_display, workspace_thread_key,
+    PathProbe, Platform, ResolvedWorkspace, WorkspaceError, WorkspaceId,
+};
+use workspace::{
+    current_platform, workspace_error_message, workspace_info, SystemPathProbe, WorkspaceInfo,
+};
+
 struct AppState {
     runtime: Mutex<Option<Arc<CodexRuntime>>>,
     cold_wake_pending: AtomicBool,
@@ -91,7 +102,7 @@ struct CodexRuntime {
     realtime_session_id: RwLock<Option<String>>,
     permission_mode: PermissionMode,
     speech_style: SpeechStyle,
-    workspace: String,
+    workspace: WorkspaceId,
     codex_binary: PathBuf,
 }
 
@@ -222,7 +233,7 @@ impl CodexRuntime {
         app: AppHandle,
         permission_mode: PermissionMode,
         speech_style: SpeechStyle,
-        workspace: String,
+        workspace: WorkspaceId,
         codex_binary: PathBuf,
     ) -> Result<Arc<Self>, String> {
         let mut command = Command::new(&codex_binary);
@@ -898,14 +909,17 @@ async fn consume_cold_wake(app: AppHandle, state: State<'_, AppState>) -> Result
     Ok(true)
 }
 
+fn resolve_workspace_info(input: &str) -> Result<(ResolvedWorkspace, WorkspaceInfo), String> {
+    workspace_info(input, current_platform(), &SystemPathProbe)
+        .map_err(|error| workspace_error_message(error).to_owned())
+}
+
 #[tauri::command]
-fn default_workspace() -> Result<String, String> {
+fn default_workspace() -> Result<WorkspaceInfo, String> {
     if let Ok(configured) = std::env::var("JARVIS_WORKSPACE") {
-        let path = PathBuf::from(configured);
-        if path.is_dir() {
-            return path
-                .canonicalize()
-                .map(|value| value.to_string_lossy().into_owned())
+        if !configured.trim().is_empty() {
+            return resolve_workspace_info(&configured)
+                .map(|(_, info)| info)
                 .map_err(|error| format!("无法读取 JARVIS_WORKSPACE：{error}"));
         }
     }
@@ -915,30 +929,22 @@ fn default_workspace() -> Result<String, String> {
         ["HOME", "USERPROFILE"]
     } {
         if let Ok(home) = std::env::var(variable) {
-            let path = PathBuf::from(home);
-            if path.is_dir() {
-                return Ok(path.to_string_lossy().into_owned());
+            if let Ok((_, info)) = resolve_workspace_info(&home) {
+                return Ok(info);
             }
         }
     }
-    std::env::current_dir()
-        .map(|value| value.to_string_lossy().into_owned())
-        .map_err(|error| format!("无法确定默认工作目录：{error}"))
+    let current = std::env::current_dir().map_err(|_| "无法确定默认工作目录".to_owned())?;
+    resolve_workspace_info(&current.to_string_lossy()).map(|(_, info)| info)
 }
 
-fn validated_workspace(cwd: &str) -> Result<String, String> {
-    let path = PathBuf::from(cwd);
-    if !path.is_dir() {
-        return Err(format!("工作目录不存在或不是文件夹：{cwd}"));
-    }
-    path.canonicalize()
-        .map(|value| value.to_string_lossy().into_owned())
-        .map_err(|error| format!("无法读取工作目录：{error}"))
+fn validated_workspace(cwd: &str) -> Result<ResolvedWorkspace, String> {
+    resolve_workspace_info(cwd).map(|(resolved, _)| resolved)
 }
 
 #[tauri::command]
-fn validate_workspace(cwd: String) -> Result<String, String> {
-    validated_workspace(&cwd)
+fn validate_workspace(cwd: String) -> Result<WorkspaceInfo, String> {
+    resolve_workspace_info(&cwd).map(|(_, info)| info)
 }
 
 async fn terminate_runtime(state: &AppState) -> Result<(), String> {
@@ -963,13 +969,14 @@ async fn ensure_runtime(
     speech_style: SpeechStyle,
     selected_codex_binary: Option<&str>,
 ) -> Result<Arc<CodexRuntime>, String> {
-    let cwd = validated_workspace(cwd)?;
+    let workspace = validated_workspace(cwd)?;
+    let cwd = workspace.id.as_str().to_owned();
     let codex_binary = codex_binary_path(&app, selected_codex_binary)?;
     let existing = { state.runtime.lock().await.clone() };
     if let Some(existing) = existing {
         if existing.permission_mode == permission_mode
             && existing.speech_style == speech_style
-            && existing.workspace == cwd
+            && existing.workspace == workspace.id
             && existing.codex_binary == codex_binary
         {
             return Ok(existing);
@@ -981,7 +988,7 @@ async fn ensure_runtime(
         app,
         permission_mode,
         speech_style,
-        cwd.clone(),
+        workspace.id.clone(),
         codex_binary,
     )
     .await?;
@@ -1004,14 +1011,10 @@ async fn ensure_runtime(
     {
         let mut resume_options = thread_options.clone();
         resume_options["threadId"] = Value::String(thread_id.to_owned());
-        match runtime.request("thread/resume", resume_options).await {
-            Ok(resumed) => resumed,
-            Err(_) => {
-                let mut start_options = thread_options;
-                start_options["ephemeral"] = Value::Bool(false);
-                runtime.request("thread/start", start_options).await?
-            }
-        }
+        runtime
+            .request("thread/resume", resume_options)
+            .await
+            .map_err(|error| format!("无法续接原 Codex thread；原 thread id 已保留：{error}"))?
     } else {
         let mut start_options = thread_options;
         start_options["ephemeral"] = Value::Bool(false);
@@ -1048,7 +1051,10 @@ async fn start_jarvis(
     )
     .await?;
     let thread_id = runtime.thread().await?;
-    Ok(SessionInfo { thread_id, cwd })
+    Ok(SessionInfo {
+        thread_id,
+        cwd: runtime.workspace.as_str().to_owned(),
+    })
 }
 
 #[tauri::command]

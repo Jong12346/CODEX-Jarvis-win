@@ -1,0 +1,249 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "measuredOn": "2026-08-04",
+    "host": "Windows 11 家庭中文版 10.0.26100.7171 AMD64",
+    "rustc": "1.97.1",
+    "method": "std::fs::canonicalize probed directly on the audit host; every windows.probe.dirs mapping below is a measured result, not an assumption",
+    "contract": "docs/WINDOWS_P0_CONTRACT.md"
+  },
+  "notes": [
+    "normalize[] tests the PURE layer normalize_workspace_path(realPath, platform). Inputs are already OS real paths, so no IO is involved.",
+    "probe.dirs maps a raw user input to the real path a PathProbe would return. equivalence[] drives canonicalize_workspace(input, platform, probe) through this fake probe.",
+    "Every equivalence input must appear in probe.dirs. A missing key means the probe reports NotFound.",
+    "expectedId is the WorkspaceId: a plain absolute path with no \\\\?\\ prefix. Drive roots are the ONLY form that keeps a trailing separator."
+  ],
+  "windows": {
+    "normalize": [
+      {
+        "name": "strips the extended-length prefix",
+        "realPath": "\\\\?\\C:\\Users\\DELL",
+        "expected": "C:\\Users\\DELL"
+      },
+      {
+        "name": "drive root keeps its trailing separator",
+        "realPath": "\\\\?\\C:\\",
+        "expected": "C:\\"
+      },
+      {
+        "name": "converts the verbatim UNC prefix back to a plain UNC path",
+        "realPath": "\\\\?\\UNC\\localhost\\C$\\Users",
+        "expected": "\\\\localhost\\C$\\Users"
+      },
+      {
+        "name": "preserves non-ASCII path segments",
+        "realPath": "\\\\?\\E:\\Workspace\\projects\\CODEX-贾维斯",
+        "expected": "E:\\Workspace\\projects\\CODEX-贾维斯"
+      },
+      {
+        "name": "preserves spaces in segments",
+        "realPath": "\\\\?\\C:\\Program Files",
+        "expected": "C:\\Program Files"
+      },
+      {
+        "name": "uppercases the drive letter defensively",
+        "realPath": "\\\\?\\c:\\Users\\DELL",
+        "expected": "C:\\Users\\DELL"
+      },
+      {
+        "name": "is a no-op on an already normalized path (idempotency of the pure layer)",
+        "realPath": "C:\\Users\\DELL",
+        "expected": "C:\\Users\\DELL"
+      },
+      {
+        "name": "preserves on-disk casing of non-drive segments",
+        "realPath": "\\\\?\\C:\\Users\\DELL\\Documents",
+        "expected": "C:\\Users\\DELL\\Documents"
+      }
+    ],
+    "probe": {
+      "dirs": {
+        "C:\\Users\\DELL": "\\\\?\\C:\\Users\\DELL",
+        "c:\\Users\\DELL": "\\\\?\\C:\\Users\\DELL",
+        "C:\\Users\\DELL\\": "\\\\?\\C:\\Users\\DELL",
+        "C:/Users/DELL": "\\\\?\\C:\\Users\\DELL",
+        "C:\\Users\\DELL\\.": "\\\\?\\C:\\Users\\DELL",
+        "C:\\Users\\DELL\\Documents\\..": "\\\\?\\C:\\Users\\DELL",
+        "C:\\USERS\\DELL": "\\\\?\\C:\\Users\\DELL",
+        "\\\\?\\C:\\Users\\DELL": "\\\\?\\C:\\Users\\DELL",
+        "C:\\PROGRA~1": "\\\\?\\C:\\Program Files",
+        "C:\\Program Files": "\\\\?\\C:\\Program Files",
+        "C:\\": "\\\\?\\C:\\",
+        "C:/": "\\\\?\\C:\\",
+        "\\\\localhost\\C$\\Users": "\\\\?\\UNC\\localhost\\C$\\Users",
+        "//localhost/C$/Users": "\\\\?\\UNC\\localhost\\C$\\Users",
+        "\\\\?\\UNC\\localhost\\C$\\Users": "\\\\?\\UNC\\localhost\\C$\\Users",
+        "C:\\Users\\DELL2": "\\\\?\\C:\\Users\\DELL2",
+        "D:\\Users\\DELL": "\\\\?\\D:\\Users\\DELL",
+        "E:\\Workspace\\projects\\CODEX-贾维斯": "\\\\?\\E:\\Workspace\\projects\\CODEX-贾维斯"
+      },
+      "files": [
+        "C:\\Windows\\notepad.exe"
+      ]
+    },
+    "equivalence": [
+      {
+        "name": "every spelling of the user profile collapses to one id",
+        "expectedId": "C:\\Users\\DELL",
+        "inputs": [
+          "C:\\Users\\DELL",
+          "c:\\Users\\DELL",
+          "C:\\Users\\DELL\\",
+          "C:/Users/DELL",
+          "C:\\Users\\DELL\\.",
+          "C:\\Users\\DELL\\Documents\\..",
+          "C:\\USERS\\DELL",
+          "\\\\?\\C:\\Users\\DELL"
+        ]
+      },
+      {
+        "name": "8.3 short names collapse onto the long form",
+        "expectedId": "C:\\Program Files",
+        "inputs": [
+          "C:\\PROGRA~1",
+          "C:\\Program Files"
+        ]
+      },
+      {
+        "name": "drive root is stable and keeps its separator",
+        "expectedId": "C:\\",
+        "inputs": [
+          "C:\\",
+          "C:/"
+        ]
+      },
+      {
+        "name": "UNC paths collapse to the plain double-backslash form",
+        "expectedId": "\\\\localhost\\C$\\Users",
+        "inputs": [
+          "\\\\localhost\\C$\\Users",
+          "//localhost/C$/Users",
+          "\\\\?\\UNC\\localhost\\C$\\Users"
+        ]
+      },
+      {
+        "name": "non-ASCII workspace path",
+        "expectedId": "E:\\Workspace\\projects\\CODEX-贾维斯",
+        "inputs": [
+          "E:\\Workspace\\projects\\CODEX-贾维斯"
+        ]
+      }
+    ],
+    "mustNotEqual": [
+      {
+        "name": "sibling directory with a shared prefix",
+        "left": "C:\\Users\\DELL",
+        "right": "C:\\Users\\DELL2"
+      },
+      {
+        "name": "same path on a different drive",
+        "left": "C:\\Users\\DELL",
+        "right": "D:\\Users\\DELL"
+      }
+    ],
+    "errors": [
+      {
+        "name": "empty input",
+        "input": "",
+        "expected": "Empty"
+      },
+      {
+        "name": "whitespace-only input",
+        "input": "   ",
+        "expected": "Empty"
+      },
+      {
+        "name": "path that does not exist must not fall back to any default",
+        "input": "C:\\definitely-not-here-9271",
+        "expected": "NotFound"
+      },
+      {
+        "name": "existing path that is a file, not a directory",
+        "input": "C:\\Windows\\notepad.exe",
+        "expected": "NotADirectory"
+      }
+    ]
+  },
+  "unix": {
+    "normalize": [
+      {
+        "name": "plain absolute path is unchanged",
+        "realPath": "/home/user",
+        "expected": "/home/user"
+      },
+      {
+        "name": "strips a trailing separator",
+        "realPath": "/home/user/",
+        "expected": "/home/user"
+      },
+      {
+        "name": "filesystem root keeps its separator",
+        "realPath": "/",
+        "expected": "/"
+      },
+      {
+        "name": "a backslash is an ordinary filename character and must survive",
+        "realPath": "/home/us\\er",
+        "expected": "/home/us\\er"
+      },
+      {
+        "name": "case is significant and must not be folded",
+        "realPath": "/home/User",
+        "expected": "/home/User"
+      },
+      {
+        "name": "a leading drive-letter-like segment is not a drive",
+        "realPath": "/C:/not-a-drive",
+        "expected": "/C:/not-a-drive"
+      }
+    ],
+    "probe": {
+      "dirs": {
+        "/home/user": "/home/user",
+        "/home/user/": "/home/user",
+        "/home/user/.": "/home/user",
+        "/home/user/docs/..": "/home/user",
+        "/home/User": "/home/User"
+      },
+      "files": [
+        "/home/user/.bashrc"
+      ]
+    },
+    "equivalence": [
+      {
+        "name": "trailing separator and dot segments collapse",
+        "expectedId": "/home/user",
+        "inputs": [
+          "/home/user",
+          "/home/user/",
+          "/home/user/.",
+          "/home/user/docs/.."
+        ]
+      }
+    ],
+    "mustNotEqual": [
+      {
+        "name": "case differences are distinct paths on unix",
+        "left": "/home/user",
+        "right": "/home/User"
+      }
+    ],
+    "errors": [
+      {
+        "name": "empty input",
+        "input": "",
+        "expected": "Empty"
+      },
+      {
+        "name": "missing path",
+        "input": "/definitely-not-here-9271",
+        "expected": "NotFound"
+      },
+      {
+        "name": "existing path that is a file",
+        "input": "/home/user/.bashrc",
+        "expected": "NotADirectory"
+      }
+    ]
+  }
+}

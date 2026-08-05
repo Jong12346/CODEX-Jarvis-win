@@ -200,9 +200,11 @@ struct RuntimeTransitionDetails {
     error_message: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum PermissionMode {
+pub enum PermissionMode {
+    #[default]
     Safe,
     Auto,
     Full,
@@ -225,31 +227,153 @@ impl SpeechStyle {
     }
 }
 
-struct PermissionProfile {
-    approval_policy: &'static str,
-    sandbox: &'static str,
-    instructions: &'static str,
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PermissionProfile {
+    pub approval_policy: &'static str,
+    pub sandbox: &'static str,
+    pub instructions: &'static str,
+}
+
+#[doc(hidden)]
+pub fn permission_profile(mode: PermissionMode) -> PermissionProfile {
+    match mode {
+        PermissionMode::Safe => PermissionProfile {
+            approval_policy: "on-request",
+            sandbox: "workspace-write",
+            instructions: "Require explicit confirmation when Codex requests approval for actions outside the workspace boundary or for risky operations.",
+        },
+        PermissionMode::Auto => PermissionProfile {
+            approval_policy: "never",
+            sandbox: "workspace-write",
+            instructions: "Work autonomously inside the selected workspace. Never request elevated access; if an action is blocked by the sandbox, explain the blocked boundary and continue with the safest in-workspace alternative.",
+        },
+        PermissionMode::Full => PermissionProfile {
+            approval_policy: "never",
+            sandbox: "danger-full-access",
+            instructions: "Full filesystem and network access is enabled. Still avoid destructive or irreversible actions unless the user explicitly requested the exact action and target.",
+        },
+    }
 }
 
 impl PermissionMode {
     fn profile(self) -> PermissionProfile {
-        match self {
-            Self::Safe => PermissionProfile {
-                approval_policy: "on-request",
-                sandbox: "workspace-write",
-                instructions: "Require explicit confirmation when Codex requests approval for actions outside the workspace boundary or for risky operations.",
-            },
-            Self::Auto => PermissionProfile {
-                approval_policy: "never",
-                sandbox: "workspace-write",
-                instructions: "Work autonomously inside the selected workspace. Never request elevated access; if an action is blocked by the sandbox, explain the blocked boundary and continue with the safest in-workspace alternative.",
-            },
-            Self::Full => PermissionProfile {
-                approval_policy: "never",
-                sandbox: "danger-full-access",
-                instructions: "Full filesystem and network access is enabled. Still avoid destructive or irreversible actions unless the user explicitly requested the exact action and target.",
-            },
+        permission_profile(self)
+    }
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionSource {
+    UserSelection,
+    StoredConfig,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionRejectionReason {
+    WorkspaceIsHome,
+    WorkspaceIsHomeAncestor,
+    RequiresConfirmation,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermissionDecision {
+    Allow(PermissionMode),
+    Reject {
+        attempted: PermissionMode,
+        reason: PermissionRejectionReason,
+    },
+    Downgraded {
+        from: PermissionMode,
+        to: PermissionMode,
+        reason: PermissionRejectionReason,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionResolution {
+    mode: PermissionMode,
+    changed: bool,
+    reason: Option<PermissionRejectionReason>,
+}
+
+fn permission_rejection_message(reason: PermissionRejectionReason) -> &'static str {
+    match reason {
+        PermissionRejectionReason::WorkspaceIsHome => {
+            "Automatic mode cannot use the user profile as its workspace"
         }
+        PermissionRejectionReason::WorkspaceIsHomeAncestor => {
+            "Automatic mode cannot use a parent of the user profile as its workspace"
+        }
+        PermissionRejectionReason::RequiresConfirmation => {
+            "Full access requires explicit confirmation"
+        }
+    }
+}
+
+fn workspace_parts(id: &WorkspaceId, platform: Platform) -> Vec<String> {
+    match platform {
+        Platform::Windows => id
+            .as_str()
+            .split(['\\', '/'])
+            .filter(|part| !part.is_empty())
+            .map(|part| part.to_ascii_lowercase())
+            .collect(),
+        Platform::Unix => id
+            .as_str()
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    }
+}
+
+#[doc(hidden)]
+pub fn evaluate_permission_mode(
+    mode: PermissionMode,
+    workspace: &WorkspaceId,
+    home: &WorkspaceId,
+    source: PermissionSource,
+    platform: Platform,
+) -> PermissionDecision {
+    if mode == PermissionMode::Safe {
+        return PermissionDecision::Allow(mode);
+    }
+    if mode == PermissionMode::Full && source == PermissionSource::StoredConfig {
+        return PermissionDecision::Downgraded {
+            from: mode,
+            to: PermissionMode::Safe,
+            reason: PermissionRejectionReason::RequiresConfirmation,
+        };
+    }
+    if mode != PermissionMode::Auto {
+        return PermissionDecision::Allow(mode);
+    }
+    let candidate_parts = workspace_parts(workspace, platform);
+    let home_parts = workspace_parts(home, platform);
+    let reason = if candidate_parts == home_parts {
+        Some(PermissionRejectionReason::WorkspaceIsHome)
+    } else if candidate_parts.len() < home_parts.len() && home_parts.starts_with(&candidate_parts) {
+        Some(PermissionRejectionReason::WorkspaceIsHomeAncestor)
+    } else {
+        None
+    };
+    match (reason, source) {
+        (None, _) => PermissionDecision::Allow(mode),
+        (Some(reason), PermissionSource::UserSelection) => PermissionDecision::Reject {
+            attempted: mode,
+            reason,
+        },
+        (Some(reason), PermissionSource::StoredConfig) => PermissionDecision::Downgraded {
+            from: mode,
+            to: PermissionMode::Safe,
+            reason,
+        },
     }
 }
 
@@ -1271,19 +1395,32 @@ fn default_workspace() -> Result<WorkspaceInfo, String> {
                 .map_err(|error| format!("无法读取 JARVIS_WORKSPACE：{error}"));
         }
     }
+    let home = user_home_path()?;
+    let default = home.join("Jarvis");
+    fs::create_dir_all(&default)
+        .map_err(|error| format!("Unable to create the default Jarvis workspace: {error}"))?;
+    resolve_workspace_info(&default.to_string_lossy()).map(|(_, info)| info)
+}
+
+fn user_home_path() -> Result<PathBuf, String> {
     for variable in if cfg!(windows) {
         ["USERPROFILE", "HOME"]
     } else {
         ["HOME", "USERPROFILE"]
     } {
         if let Ok(home) = std::env::var(variable) {
-            if let Ok((_, info)) = resolve_workspace_info(&home) {
-                return Ok(info);
+            let path = PathBuf::from(home);
+            if path.is_dir() {
+                return Ok(path);
             }
         }
     }
-    let current = std::env::current_dir().map_err(|_| "无法确定默认工作目录".to_owned())?;
-    resolve_workspace_info(&current.to_string_lossy()).map(|(_, info)| info)
+    Err("Unable to determine the user profile directory".to_owned())
+}
+
+fn home_workspace_id() -> Result<WorkspaceId, String> {
+    let home = user_home_path()?;
+    resolve_workspace_info(&home.to_string_lossy()).map(|(resolved, _)| resolved.id)
 }
 
 fn validated_workspace(cwd: &str) -> Result<ResolvedWorkspace, String> {
@@ -1293,6 +1430,31 @@ fn validated_workspace(cwd: &str) -> Result<ResolvedWorkspace, String> {
 #[tauri::command]
 fn validate_workspace(cwd: String) -> Result<WorkspaceInfo, String> {
     resolve_workspace_info(&cwd).map(|(_, info)| info)
+}
+
+#[tauri::command]
+fn resolve_permission_mode(
+    cwd: String,
+    mode: PermissionMode,
+    source: PermissionSource,
+) -> Result<PermissionResolution, String> {
+    let workspace = validated_workspace(&cwd)?;
+    let home = home_workspace_id()?;
+    match evaluate_permission_mode(mode, &workspace.id, &home, source, current_platform()) {
+        PermissionDecision::Allow(mode) => Ok(PermissionResolution {
+            mode,
+            changed: false,
+            reason: None,
+        }),
+        PermissionDecision::Downgraded { to, reason, .. } => Ok(PermissionResolution {
+            mode: to,
+            changed: true,
+            reason: Some(reason),
+        }),
+        PermissionDecision::Reject { reason, .. } => {
+            Err(permission_rejection_message(reason).to_owned())
+        }
+    }
 }
 
 async fn terminate_runtime(
@@ -1510,6 +1672,20 @@ async fn ensure_runtime(
     selected_codex_binary: Option<&str>,
 ) -> Result<Arc<CodexRuntime>, String> {
     let workspace = validated_workspace(cwd)?;
+    let home = home_workspace_id()?;
+    let permission_mode = match evaluate_permission_mode(
+        permission_mode,
+        &workspace.id,
+        &home,
+        PermissionSource::UserSelection,
+        current_platform(),
+    ) {
+        PermissionDecision::Allow(mode) => mode,
+        PermissionDecision::Reject { reason, .. } => {
+            return Err(permission_rejection_message(reason).to_owned());
+        }
+        PermissionDecision::Downgraded { to, .. } => to,
+    };
     let current_status = state.runtime_status.read().await.state;
     if matches!(
         current_status,
@@ -1803,6 +1979,7 @@ pub fn run() {
             runtime_state,
             default_workspace,
             validate_workspace,
+            resolve_permission_mode,
             startup_is_background,
             request_microphone_permission,
             start_jarvis,

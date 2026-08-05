@@ -62,7 +62,10 @@ fn the_mapping_table_is_exact() {
         (PermissionMode::Full, "never", "danger-full-access"),
     ] {
         let profile = permission_profile(mode);
-        assert_eq!(profile.approval_policy, approval, "{mode:?}.approval_policy");
+        assert_eq!(
+            profile.approval_policy, approval,
+            "{mode:?}.approval_policy"
+        );
         assert_eq!(profile.sandbox, sandbox, "{mode:?}.sandbox");
         assert!(
             !profile.instructions.trim().is_empty(),
@@ -75,7 +78,10 @@ fn the_mapping_table_is_exact() {
 fn safe_is_the_only_mode_that_still_asks() {
     // 决定 3 的实质：safe 之外的两个模式都不再询问，
     // 所以默认值必须是 safe。
-    assert_eq!(permission_profile(PermissionMode::Safe).approval_policy, "on-request");
+    assert_eq!(
+        permission_profile(PermissionMode::Safe).approval_policy,
+        "on-request"
+    );
     for mode in [PermissionMode::Auto, PermissionMode::Full] {
         assert_eq!(
             permission_profile(mode).approval_policy,
@@ -137,7 +143,11 @@ fn auto_is_allowed_strictly_below_the_home_directory() {
     // 决定 2 的默认工作区 %USERPROFILE%\Jarvis 必须仍然可用 auto，
     // 否则新默认值会让推荐配置无法工作。
     let home = id(r"C:\Users\DELL");
-    for descendant in [r"C:\Users\DELL\Jarvis", r"C:\Users\DELL\Jarvis\project", r"E:\Workspace"] {
+    for descendant in [
+        r"C:\Users\DELL\Jarvis",
+        r"C:\Users\DELL\Jarvis\project",
+        r"E:\Workspace",
+    ] {
         let decision = evaluate_permission_mode(
             PermissionMode::Auto,
             &id(descendant),
@@ -217,7 +227,10 @@ fn stored_config_never_restores_full_access() {
 fn safe_is_always_allowed_regardless_of_workspace() {
     let home = id(r"C:\Users\DELL");
     for workspace in [r"C:\Users\DELL", r"C:\Users", r"C:\", r"E:\Workspace"] {
-        for source in [PermissionSource::UserSelection, PermissionSource::StoredConfig] {
+        for source in [
+            PermissionSource::UserSelection,
+            PermissionSource::StoredConfig,
+        ] {
             let decision = evaluate_permission_mode(
                 PermissionMode::Safe,
                 &id(workspace),
@@ -238,7 +251,10 @@ fn no_decision_path_silently_keeps_auto_over_the_home_directory() {
     // 兜底不变量：无论来源如何，"auto + 主目录/祖先"都不得产出 Allow(Auto)。
     let home = id(r"C:\Users\DELL");
     for workspace in [r"C:\Users\DELL", r"C:\Users", r"C:\"] {
-        for source in [PermissionSource::UserSelection, PermissionSource::StoredConfig] {
+        for source in [
+            PermissionSource::UserSelection,
+            PermissionSource::StoredConfig,
+        ] {
             let decision = evaluate_permission_mode(
                 PermissionMode::Auto,
                 &id(workspace),

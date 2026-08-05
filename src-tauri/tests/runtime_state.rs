@@ -75,7 +75,10 @@ fn child_exit_must_move_a_ready_runtime_out_of_ready() {
 fn no_state_reports_ready_after_a_terminal_observation() {
     // 兜底不变量：任何状态收到 EOF 或退出后都不得停留在 Ready。
     for state in ALL_STATES {
-        for event in [RuntimeEvent::StdoutEof, RuntimeEvent::ChildExited { code: Some(1) }] {
+        for event in [
+            RuntimeEvent::StdoutEof,
+            RuntimeEvent::ChildExited { code: Some(1) },
+        ] {
             assert_ne!(
                 runtime_state_transition(state, event),
                 RuntimeState::Ready,
@@ -254,7 +257,10 @@ fn only_ready_accepts_requests() {
         request_rejection(RuntimeState::Ready).is_none(),
         "Ready must accept requests",
     );
-    for state in ALL_STATES.into_iter().filter(|state| *state != RuntimeState::Ready) {
+    for state in ALL_STATES
+        .into_iter()
+        .filter(|state| *state != RuntimeState::Ready)
+    {
         assert!(
             request_rejection(state).is_some(),
             "{state:?} must reject requests instead of letting them hang",
@@ -271,11 +277,23 @@ fn rejection_codes_are_stable_and_distinct() {
         RequestRejection::RuntimeRestarting.code(),
         RequestRejection::RuntimeFailed.code(),
     ];
-    assert_eq!(codes, ["runtime_absent", "runtime_exited", "runtime_restarting", "runtime_failed"]);
-    let mut sorted = codes;
+    assert_eq!(
+        codes,
+        [
+            "runtime_absent",
+            "runtime_exited",
+            "runtime_restarting",
+            "runtime_failed"
+        ]
+    );
+    let mut sorted = codes.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
-    assert_eq!(sorted.len(), codes.len(), "rejection codes must be distinct");
+    assert_eq!(
+        sorted.len(),
+        codes.len(),
+        "rejection codes must be distinct"
+    );
 }
 
 // ---------------------------------------------------- shutdown 与代际竞态
@@ -296,11 +314,19 @@ fn a_stale_watcher_never_restarts_a_replaced_runtime() {
     // 主动 shutdown 后旧监视任务仍会观测到 EOF。若它据此重启，
     // 就会在用户已经停止 Jarvis 之后复活一个 app-server。
     assert!(
-        !should_watcher_restart(RuntimeGeneration(1), RuntimeGeneration(2), RuntimeState::Dead),
+        !should_watcher_restart(
+            RuntimeGeneration(1),
+            RuntimeGeneration(2),
+            RuntimeState::Dead
+        ),
         "generation 1 watcher must not act after generation 2 took over",
     );
     assert!(
-        !should_watcher_restart(RuntimeGeneration(1), RuntimeGeneration(1), RuntimeState::Absent),
+        !should_watcher_restart(
+            RuntimeGeneration(1),
+            RuntimeGeneration(1),
+            RuntimeState::Absent
+        ),
         "a deliberately shut-down runtime must stay down",
     );
 }
@@ -316,7 +342,10 @@ fn the_current_watcher_may_restart_its_own_dead_runtime() {
 
 #[test]
 fn a_watcher_never_restarts_from_a_non_dead_state() {
-    for state in ALL_STATES.into_iter().filter(|state| *state != RuntimeState::Dead) {
+    for state in ALL_STATES
+        .into_iter()
+        .filter(|state| *state != RuntimeState::Dead)
+    {
         assert!(
             !should_watcher_restart(RuntimeGeneration(3), RuntimeGeneration(3), state),
             "{state:?} is not a restartable observation",

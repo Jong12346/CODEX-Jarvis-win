@@ -29,3 +29,4 @@ objc2-av-foundation = { version = "0.3.2", default-features = false, features = 
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55.0"
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

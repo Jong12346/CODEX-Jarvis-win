@@ -21,6 +21,14 @@ type DirectVoice = {
   threadId?: string;
   realtimeSessionId?: string;
 };
+type RuntimeStateInfo = {
+  state: "absent" | "starting" | "ready" | "degraded" | "dead" | "restarting" | "failed";
+  runtimeId?: string;
+  restartAttempts: number;
+  lastExitCode?: number;
+  lastErrorCode?: string;
+  lastError?: string;
+};
 type WakeStatus = {
   enabled: boolean;
   ready: boolean;
@@ -915,6 +923,34 @@ async function stopDirectVoice() {
 
 if (currentWindow) {
   await listen<Message>("codex-event", ({ payload }) => void handle(payload));
+  await listen<RuntimeStateInfo>("jarvis-runtime-state", ({ payload }) => {
+    if (payload.state === "ready") {
+      banner.hidden = true;
+      if (!state.manualStop && !state.directVoice?.voiceActive) setMode("ready");
+      void invoke<DirectVoice>("direct_voice_status").then(updateVoiceInfo);
+      return;
+    }
+    cleanupPeer();
+    state.directVoice = null;
+    state.agentWorking = false;
+    if (payload.state === "absent" && state.manualStop) {
+      setMode("stopped");
+      return;
+    }
+    setMode("degraded");
+    banner.hidden = false;
+    const detail = payload.lastError ?? ({
+      starting: "Codex runtime is starting…",
+      degraded: "Codex runtime initialization failed.",
+      dead: "Codex runtime exited unexpectedly.",
+      restarting: `Codex runtime is restarting (attempt ${payload.restartAttempts}/3)…`,
+      failed: "Codex runtime could not be recovered automatically.",
+      absent: "Codex runtime is not running.",
+    } as const)[payload.state];
+    $("#degraded-copy").textContent = detail;
+    response.textContent = detail;
+    void armWakeListener();
+  });
   await listen<WakeStatus>("jarvis-wake-status", ({ payload }) => {
     state.wake = payload;
     $("#wake-auth").textContent = payload.ready

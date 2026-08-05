@@ -3,23 +3,37 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     fs,
+    fs::OpenOptions,
+    io::Write as _,
     path::PathBuf,
     process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex as StdMutex,
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, Command},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    process::Command,
     sync::{oneshot, Mutex, RwLock},
     time::{timeout, Duration},
 };
 
+mod process;
+mod runtime_state;
 mod workspace;
 
+use process::SystemProcessSpawner;
+#[doc(hidden)]
+pub use process::{ProcessControl, ProcessSpawner, ProcessSpec, SpawnedCodexProcess};
+#[doc(hidden)]
+pub use runtime_state::{
+    request_rejection, restart_backoff, runtime_state_transition, should_watcher_restart,
+    stability_reset_interval, RequestRejection, RuntimeEvent, RuntimeGeneration, RuntimeState,
+    MAX_AUTO_RESTARTS,
+};
 #[doc(hidden)]
 pub use workspace::{
     canonicalize_workspace, normalize_workspace_path, workspace_display, workspace_thread_key,
@@ -31,6 +45,11 @@ use workspace::{
 
 struct AppState {
     runtime: Mutex<Option<Arc<CodexRuntime>>>,
+    runtime_status: RwLock<RuntimeStateInfo>,
+    runtime_generation: AtomicU64,
+    desired_runtime: Mutex<Option<RuntimeLaunchConfig>>,
+    process_spawner: Arc<dyn ProcessSpawner>,
+    log_lock: StdMutex<()>,
     cold_wake_pending: AtomicBool,
     background_start: bool,
     wake_enabled: AtomicBool,
@@ -91,8 +110,8 @@ async fn request_microphone_permission() -> Result<String, String> {
 }
 
 struct CodexRuntime {
-    writer: Mutex<ChildStdin>,
-    child: Mutex<Child>,
+    writer: Mutex<Box<dyn AsyncWrite + Send + Unpin>>,
+    control: Arc<dyn ProcessControl>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
     next_id: AtomicU64,
     thread_id: RwLock<Option<String>>,
@@ -104,6 +123,81 @@ struct CodexRuntime {
     speech_style: SpeechStyle,
     workspace: WorkspaceId,
     codex_binary: PathBuf,
+    generation: RuntimeGeneration,
+    terminal_observed: AtomicBool,
+}
+
+struct RuntimeIo {
+    stdout: Box<dyn AsyncRead + Send + Unpin>,
+    stderr: Box<dyn AsyncRead + Send + Unpin>,
+}
+
+#[derive(Clone)]
+struct RuntimeLaunchConfig {
+    permission_mode: PermissionMode,
+    speech_style: SpeechStyle,
+    workspace: WorkspaceId,
+    codex_binary: PathBuf,
+    resume_thread_id: Option<String>,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeStateInfo {
+    runtime_id: Option<String>,
+    state: RuntimeState,
+    restart_attempts: u32,
+    last_exit_code: Option<i32>,
+    last_error_code: Option<String>,
+    last_error: Option<String>,
+}
+
+impl Default for RuntimeStateInfo {
+    fn default() -> Self {
+        Self {
+            runtime_id: None,
+            state: RuntimeState::Absent,
+            restart_attempts: 0,
+            last_exit_code: None,
+            last_error_code: None,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeTransitionLog<'a> {
+    schema_version: u8,
+    timestamp_ms: u128,
+    event: &'static str,
+    runtime_id: Option<&'a str>,
+    from: RuntimeState,
+    to: RuntimeState,
+    trigger: &'static str,
+    pid: Option<u32>,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    restart_attempt: u32,
+    error_code: Option<&'a str>,
+    error_message: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WakeProtocolLog {
+    schema_version: u8,
+    timestamp_ms: u128,
+    event: &'static str,
+}
+
+#[derive(Default)]
+struct RuntimeTransitionDetails {
+    pid: Option<u32>,
+    exit_code: Option<i32>,
+    error_code: Option<String>,
+    error_message: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -198,6 +292,303 @@ struct WakeStatus {
     authorization: String,
 }
 
+fn append_runtime_log<T: Serialize>(app: &AppHandle, record: &T) {
+    let state = app.state::<AppState>();
+    let Ok(_guard) = state.log_lock.lock() else {
+        return;
+    };
+    let Ok(directory) = app.path().app_log_dir() else {
+        return;
+    };
+    if fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join("jarvis-runtime.jsonl"))
+    else {
+        return;
+    };
+    if let Ok(mut line) = serde_json::to_vec(record) {
+        line.push(b'\n');
+        let _ = file.write_all(&line);
+    }
+}
+
+fn log_wake_protocol_event(app: &AppHandle, event: &'static str) {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    append_runtime_log(
+        app,
+        &WakeProtocolLog {
+            schema_version: 1,
+            timestamp_ms,
+            event,
+        },
+    );
+}
+
+async fn transition_runtime_state(
+    app: &AppHandle,
+    event: RuntimeEvent,
+    details: RuntimeTransitionDetails,
+) -> RuntimeStateInfo {
+    let state = app.state::<AppState>();
+    let (from, info) = {
+        let mut info = state.runtime_status.write().await;
+        let from = info.state;
+        info.state = runtime_state_transition(from, event);
+        if let Some(code) = details.exit_code {
+            info.last_exit_code = Some(code);
+        }
+        if details.error_code.is_some() {
+            info.last_error_code = details.error_code.clone();
+            info.last_error = details.error_message.clone();
+        }
+        (from, info.clone())
+    };
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    append_runtime_log(
+        app,
+        &RuntimeTransitionLog {
+            schema_version: 1,
+            timestamp_ms,
+            event: "jarvis.runtime.state_transition",
+            runtime_id: info.runtime_id.as_deref(),
+            from,
+            to: info.state,
+            trigger: event.trigger(),
+            pid: details.pid,
+            exit_code: details.exit_code,
+            signal: None,
+            restart_attempt: info.restart_attempts,
+            error_code: details.error_code.as_deref(),
+            error_message: details.error_message.as_deref(),
+        },
+    );
+    let _ = app.emit("jarvis-runtime-state", info.clone());
+    info
+}
+
+#[tauri::command]
+async fn runtime_state(state: State<'_, AppState>) -> Result<RuntimeStateInfo, String> {
+    Ok(state.runtime_status.read().await.clone())
+}
+
+fn start_runtime_watchers(app: AppHandle, runtime: &Arc<CodexRuntime>, io: RuntimeIo) {
+    let RuntimeIo { stdout, stderr } = io;
+    let weak = Arc::downgrade(runtime);
+    let event_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if message.get("method").is_none() {
+                if let Some(id) = message.get("id").and_then(Value::as_u64) {
+                    if let Some(runtime) = weak.upgrade() {
+                        if let Some(sender) = runtime.pending.lock().await.remove(&id) {
+                            let result = if let Some(error) = message.get("error") {
+                                Err(error
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("Codex request failed")
+                                    .to_owned())
+                            } else {
+                                Ok(message.get("result").cloned().unwrap_or(Value::Null))
+                            };
+                            let _ = sender.send(result);
+                        }
+                    }
+                }
+                continue;
+            }
+            if let Some(runtime) = weak.upgrade() {
+                match message.get("method").and_then(Value::as_str) {
+                    Some("turn/started") => {
+                        *runtime.active_turn.write().await = message
+                            .pointer("/params/turn/id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                    Some("turn/completed") => *runtime.active_turn.write().await = None,
+                    Some("thread/realtime/started") => {
+                        runtime.voice_active.store(true, Ordering::SeqCst);
+                        *runtime.voice_phase.write().await = "connected".to_owned();
+                        *runtime.realtime_session_id.write().await = message
+                            .pointer("/params/realtimeSessionId")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                    Some("thread/realtime/error") => {
+                        runtime.voice_active.store(false, Ordering::SeqCst);
+                        *runtime.voice_phase.write().await = "error".to_owned();
+                    }
+                    Some("thread/realtime/closed") => {
+                        runtime.voice_active.store(false, Ordering::SeqCst);
+                        *runtime.voice_phase.write().await = "closed".to_owned();
+                        *runtime.realtime_session_id.write().await = None;
+                    }
+                    _ => {}
+                }
+            }
+            let _ = event_app.emit("codex-event", message);
+        }
+        if let Some(runtime) = weak.upgrade() {
+            observe_runtime_death(event_app, runtime, RuntimeEvent::StdoutEof, None).await;
+        }
+    });
+
+    let diagnostic_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.contains("ERROR") {
+                let _ = diagnostic_app.emit("codex-diagnostic", line);
+            }
+        }
+    });
+
+    let weak = Arc::downgrade(runtime);
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let Some(runtime) = weak.upgrade() else {
+                break;
+            };
+            if runtime.terminal_observed.load(Ordering::SeqCst) {
+                break;
+            }
+            match runtime.control.try_wait() {
+                Ok(Some(code)) => {
+                    observe_runtime_death(
+                        app.clone(),
+                        runtime,
+                        RuntimeEvent::ChildExited { code: Some(code) },
+                        Some(code),
+                    )
+                    .await;
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    observe_runtime_death(
+                        app.clone(),
+                        runtime,
+                        RuntimeEvent::ChildExited { code: None },
+                        None,
+                    )
+                    .await;
+                    let _ = app.emit("codex-diagnostic", error);
+                    break;
+                }
+            }
+        }
+    });
+}
+
+async fn observe_runtime_death(
+    app: AppHandle,
+    runtime: Arc<CodexRuntime>,
+    event: RuntimeEvent,
+    exit_code: Option<i32>,
+) {
+    if runtime.terminal_observed.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let state = app.state::<AppState>();
+    let current = RuntimeGeneration(state.runtime_generation.load(Ordering::SeqCst));
+    if runtime.generation != current {
+        return;
+    }
+    runtime.fail_pending("runtime_exited").await;
+    runtime.reset_voice_state().await;
+    let _ = runtime.control.start_kill();
+    {
+        let mut active = state.runtime.lock().await;
+        if active
+            .as_ref()
+            .is_some_and(|candidate| Arc::ptr_eq(candidate, &runtime))
+        {
+            active.take();
+        }
+    }
+    let info = transition_runtime_state(
+        &app,
+        event,
+        RuntimeTransitionDetails {
+            pid: runtime.control.pid(),
+            exit_code,
+            error_code: Some("runtime_exited".to_owned()),
+            error_message: Some("Codex app-server 已退出".to_owned()),
+        },
+    )
+    .await;
+    if should_watcher_restart(runtime.generation, current, info.state) {
+        schedule_runtime_restart(app, runtime.generation).await;
+    }
+}
+
+fn schedule_runtime_restart(
+    app: AppHandle,
+    generation: RuntimeGeneration,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        let state = app.state::<AppState>();
+        let attempt = state.runtime_status.read().await.restart_attempts + 1;
+        let Some(delay) = restart_backoff(attempt) else {
+            transition_runtime_state(
+                &app,
+                RuntimeEvent::RestartExhausted,
+                RuntimeTransitionDetails {
+                    error_code: Some("runtime_failed".to_owned()),
+                    error_message: Some("Codex app-server 自动重启次数已用尽".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await;
+            return;
+        };
+        state.runtime_status.write().await.restart_attempts = attempt;
+        transition_runtime_state(
+            &app,
+            RuntimeEvent::RestartScheduled,
+            RuntimeTransitionDetails::default(),
+        )
+        .await;
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let state = app.state::<AppState>();
+            let current = RuntimeGeneration(state.runtime_generation.load(Ordering::SeqCst));
+            let status = state.runtime_status.read().await.clone();
+            if generation != current || status.state != RuntimeState::Restarting {
+                return;
+            }
+            let Some(config) = state.desired_runtime.lock().await.clone() else {
+                return;
+            };
+            let next =
+                RuntimeGeneration(state.runtime_generation.fetch_add(1, Ordering::SeqCst) + 1);
+            if launch_runtime(app.clone(), config, next, attempt)
+                .await
+                .is_err()
+            {
+                let status = state.runtime_status.read().await.state;
+                if status == RuntimeState::Dead {
+                    schedule_runtime_restart(app, next).await;
+                }
+            }
+        });
+    })
+}
+
 fn raise_jarvis_window(app: &AppHandle) {
     let app_handle = app.clone();
     let _ = app.run_on_main_thread(move || {
@@ -230,38 +621,32 @@ fn raise_jarvis_window(app: &AppHandle) {
 
 impl CodexRuntime {
     async fn spawn(
-        app: AppHandle,
         permission_mode: PermissionMode,
         speech_style: SpeechStyle,
         workspace: WorkspaceId,
         codex_binary: PathBuf,
-    ) -> Result<Arc<Self>, String> {
-        let mut command = Command::new(&codex_binary);
-        command
-            // Realtime is an experimental app-server surface. Enable it only
-            // for this isolated Jarvis child; never mutate ~/.codex/config.toml.
-            .args(["app-server", "--enable", "realtime_conversation", "--stdio"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        generation: RuntimeGeneration,
+        spawner: Arc<dyn ProcessSpawner>,
+    ) -> Result<(Arc<Self>, RuntimeIo), String> {
         #[cfg(target_os = "windows")]
-        {
-            // The npm Codex binary is a console executable. Without this,
-            // Windows Terminal opens behind the transparent Jarvis window.
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
-            apply_windows_proxy(&mut command);
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("无法启动 codex app-server：{error}"))?;
-        let writer = child.stdin.take().ok_or("无法连接 Codex stdin")?;
-        let stdout = child.stdout.take().ok_or("无法连接 Codex stdout")?;
-        let stderr = child.stderr.take().ok_or("无法连接 Codex stderr")?;
+        const CREATION_FLAGS: u32 = 0x0800_0000;
+        #[cfg(not(target_os = "windows"))]
+        const CREATION_FLAGS: u32 = 0;
+        let process = spawner.spawn(ProcessSpec {
+            binary: codex_binary.clone(),
+            // Realtime is enabled only for this child; never mutate the user's
+            // ~/.codex/config.toml while constructing the launch specification.
+            args: ["app-server", "--enable", "realtime_conversation", "--stdio"]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            env: Vec::new(),
+            creation_flags: CREATION_FLAGS,
+        })?;
+        let control: Arc<dyn ProcessControl> = Arc::from(process.control);
         let runtime = Arc::new(Self {
-            writer: Mutex::new(writer),
-            child: Mutex::new(child),
+            writer: Mutex::new(process.stdin),
+            control,
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             thread_id: RwLock::new(None),
@@ -273,85 +658,16 @@ impl CodexRuntime {
             speech_style,
             workspace,
             codex_binary,
+            generation,
+            terminal_observed: AtomicBool::new(false),
         });
-
-        let weak = Arc::downgrade(&runtime);
-        let event_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(message) = serde_json::from_str::<Value>(&line) else {
-                    continue;
-                };
-                eprintln!(
-                    "codex rpc: id={} method={}",
-                    message
-                        .get("id")
-                        .map(Value::to_string)
-                        .unwrap_or_else(|| "-".to_owned()),
-                    message.get("method").and_then(Value::as_str).unwrap_or("-")
-                );
-                if message.get("method").is_none() {
-                    if let Some(id) = message.get("id").and_then(Value::as_u64) {
-                        if let Some(runtime) = weak.upgrade() {
-                            if let Some(sender) = runtime.pending.lock().await.remove(&id) {
-                                let result = if let Some(error) = message.get("error") {
-                                    Err(error
-                                        .get("message")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("Codex request failed")
-                                        .to_owned())
-                                } else {
-                                    Ok(message.get("result").cloned().unwrap_or(Value::Null))
-                                };
-                                let _ = sender.send(result);
-                            }
-                        }
-                    }
-                    continue;
-                }
-                if let Some(runtime) = weak.upgrade() {
-                    match message.get("method").and_then(Value::as_str) {
-                        Some("turn/started") => {
-                            *runtime.active_turn.write().await = message
-                                .pointer("/params/turn/id")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned);
-                        }
-                        Some("turn/completed") => *runtime.active_turn.write().await = None,
-                        Some("thread/realtime/started") => {
-                            runtime.voice_active.store(true, Ordering::SeqCst);
-                            *runtime.voice_phase.write().await = "connected".to_owned();
-                            *runtime.realtime_session_id.write().await = message
-                                .pointer("/params/realtimeSessionId")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned);
-                        }
-                        Some("thread/realtime/error") => {
-                            runtime.voice_active.store(false, Ordering::SeqCst);
-                            *runtime.voice_phase.write().await = "error".to_owned();
-                        }
-                        Some("thread/realtime/closed") => {
-                            runtime.voice_active.store(false, Ordering::SeqCst);
-                            *runtime.voice_phase.write().await = "closed".to_owned();
-                            *runtime.realtime_session_id.write().await = None;
-                        }
-                        _ => {}
-                    }
-                }
-                let _ = event_app.emit("codex-event", message);
-            }
-        });
-        tauri::async_runtime::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                eprintln!("codex stderr: {line}");
-                if line.contains("ERROR") {
-                    let _ = app.emit("codex-diagnostic", line);
-                }
-            }
-        });
-        Ok(runtime)
+        Ok((
+            runtime,
+            RuntimeIo {
+                stdout: process.stdout,
+                stderr: process.stderr,
+            },
+        ))
     }
 
     async fn write(&self, message: &Value) -> Result<(), String> {
@@ -366,6 +682,9 @@ impl CodexRuntime {
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+        if self.terminal_observed.load(Ordering::SeqCst) {
+            return Err(RequestRejection::RuntimeExited.code().to_owned());
+        }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().await.insert(id, sender);
@@ -380,6 +699,26 @@ impl CodexRuntime {
             .await
             .map_err(|_| format!("{method} 响应超时"))?
             .map_err(|_| format!("{method} 响应通道关闭"))?
+    }
+
+    async fn fail_pending(&self, code: &'static str) {
+        let senders = self
+            .pending
+            .lock()
+            .await
+            .drain()
+            .map(|(_, sender)| sender)
+            .collect::<Vec<_>>();
+        for sender in senders {
+            let _ = sender.send(Err(code.to_owned()));
+        }
+    }
+
+    async fn reset_voice_state(&self) {
+        self.voice_active.store(false, Ordering::SeqCst);
+        *self.voice_phase.write().await = "disconnected".to_owned();
+        *self.realtime_session_id.write().await = None;
+        *self.active_turn.write().await = None;
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
@@ -570,6 +909,10 @@ fn windows_proxy_url(address: &str) -> Option<String> {
 }
 
 async fn runtime(state: &State<'_, AppState>) -> Result<Arc<CodexRuntime>, String> {
+    let status = state.runtime_status.read().await.state;
+    if let Some(rejection) = request_rejection(status) {
+        return Err(rejection.code().to_owned());
+    }
     state
         .runtime
         .lock()
@@ -579,6 +922,7 @@ async fn runtime(state: &State<'_, AppState>) -> Result<Arc<CodexRuntime>, Strin
 }
 
 async fn direct_voice_info(state: &State<'_, AppState>) -> DirectVoiceInfo {
+    let codex_connected = state.runtime_status.read().await.state == RuntimeState::Ready;
     let runtime = state.runtime.lock().await.clone();
     let Some(runtime) = runtime else {
         return DirectVoiceInfo {
@@ -594,7 +938,7 @@ async fn direct_voice_info(state: &State<'_, AppState>) -> DirectVoiceInfo {
     let thread_id = runtime.thread_id.read().await.clone();
     let realtime_session_id = runtime.realtime_session_id.read().await.clone();
     DirectVoiceInfo {
-        codex_connected: true,
+        codex_connected,
         voice_active: runtime.voice_active.load(Ordering::SeqCst),
         phase,
         protocol: "Codex app-server V3 · WebRTC",
@@ -736,6 +1080,7 @@ fn start_wake_supervisor(app: AppHandle) {
                 let lines: Vec<&str> = content.lines().collect();
                 for line in lines.iter().skip(processed) {
                     let Ok(message) = serde_json::from_str::<Value>(line) else {
+                        log_wake_protocol_event(&app, "wake.protocol.invalid_json");
                         continue;
                     };
                     match message.get("type").and_then(Value::as_str) {
@@ -770,7 +1115,10 @@ fn start_wake_supervisor(app: AppHandle) {
                             state.wake_enabled.store(false, Ordering::SeqCst);
                             state.wake_ready.store(false, Ordering::SeqCst);
                         }
-                        _ => {}
+                        _ => {
+                            log_wake_protocol_event(&app, "wake.protocol.unknown_type");
+                            continue;
+                        }
                     }
                     let _ = app.emit("jarvis-wake-status", wake_status_value(&state).await);
                     if woke {
@@ -947,17 +1295,209 @@ fn validate_workspace(cwd: String) -> Result<WorkspaceInfo, String> {
     resolve_workspace_info(&cwd).map(|(_, info)| info)
 }
 
-async fn terminate_runtime(state: &AppState) -> Result<(), String> {
-    if let Some(runtime) = state.runtime.lock().await.take() {
-        runtime
-            .child
-            .lock()
-            .await
-            .kill()
-            .await
-            .map_err(|error| error.to_string())?;
+async fn terminate_runtime(
+    app: &AppHandle,
+    state: &AppState,
+    clear_desired: bool,
+) -> Result<(), String> {
+    state.runtime_generation.fetch_add(1, Ordering::SeqCst);
+    if clear_desired {
+        state.desired_runtime.lock().await.take();
     }
+    if let Some(runtime) = state.runtime.lock().await.take() {
+        runtime.terminal_observed.store(true, Ordering::SeqCst);
+        runtime.fail_pending("runtime_absent").await;
+        runtime.reset_voice_state().await;
+        runtime.control.start_kill()?;
+    }
+    transition_runtime_state(
+        app,
+        RuntimeEvent::ShutdownRequested,
+        RuntimeTransitionDetails::default(),
+    )
+    .await;
     Ok(())
+}
+
+async fn fail_runtime_startup(
+    app: &AppHandle,
+    state: &AppState,
+    runtime: &Arc<CodexRuntime>,
+    error: String,
+) -> String {
+    transition_runtime_state(
+        app,
+        RuntimeEvent::InitializeErr,
+        RuntimeTransitionDetails {
+            pid: runtime.control.pid(),
+            error_code: Some("runtime_initialize_failed".to_owned()),
+            error_message: Some(error.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    runtime.terminal_observed.store(true, Ordering::SeqCst);
+    runtime.fail_pending("runtime_absent").await;
+    runtime.reset_voice_state().await;
+    let _ = runtime.control.start_kill();
+    let mut active = state.runtime.lock().await;
+    if active
+        .as_ref()
+        .is_some_and(|candidate| Arc::ptr_eq(candidate, runtime))
+    {
+        active.take();
+    }
+    error
+}
+
+async fn launch_runtime(
+    app: AppHandle,
+    config: RuntimeLaunchConfig,
+    generation: RuntimeGeneration,
+    restart_attempt: u32,
+) -> Result<Arc<CodexRuntime>, String> {
+    let state = app.state::<AppState>();
+    {
+        let mut status = state.runtime_status.write().await;
+        status.runtime_id = Some(generation.0.to_string());
+        status.restart_attempts = restart_attempt;
+        status.last_exit_code = None;
+        status.last_error_code = None;
+        status.last_error = None;
+    }
+    let spawned = CodexRuntime::spawn(
+        config.permission_mode,
+        config.speech_style,
+        config.workspace.clone(),
+        config.codex_binary.clone(),
+        generation,
+        state.process_spawner.clone(),
+    )
+    .await;
+    let (runtime, io) = match spawned {
+        Ok(value) => value,
+        Err(error) => {
+            transition_runtime_state(
+                &app,
+                RuntimeEvent::SpawnErr,
+                RuntimeTransitionDetails {
+                    error_code: Some("runtime_spawn_failed".to_owned()),
+                    error_message: Some(error.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    *state.runtime.lock().await = Some(runtime.clone());
+    transition_runtime_state(
+        &app,
+        RuntimeEvent::SpawnOk,
+        RuntimeTransitionDetails {
+            pid: runtime.control.pid(),
+            ..Default::default()
+        },
+    )
+    .await;
+    start_runtime_watchers(app.clone(), &runtime, io);
+
+    let initialized = runtime
+        .request(
+            "initialize",
+            json!({
+                "clientInfo": {"name": "jarvis-codex", "title": "Jarvis Codex", "version": env!("CARGO_PKG_VERSION")},
+                "capabilities": {"experimentalApi": true}
+            }),
+        )
+        .await;
+    if let Err(error) = initialized {
+        return Err(fail_runtime_startup(&app, &state, &runtime, error).await);
+    }
+    if let Err(error) = runtime.notify("initialized", json!({})).await {
+        return Err(fail_runtime_startup(&app, &state, &runtime, error).await);
+    }
+    transition_runtime_state(
+        &app,
+        RuntimeEvent::InitializeOk,
+        RuntimeTransitionDetails {
+            pid: runtime.control.pid(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let profile = config.permission_mode.profile();
+    let thread_options = json!({
+        "cwd": config.workspace.as_str(),
+        "approvalPolicy": profile.approval_policy,
+        "sandbox": profile.sandbox,
+        "baseInstructions": format!(
+            "You are Codex speaking through the local Jarvis interface. Keep voice replies concise and natural, execute real tasks with Codex tools when asked, report progress while work continues, and accept spoken corrections in the same thread. {} {}",
+            config.speech_style.instructions(),
+            profile.instructions
+        )
+    });
+    let thread_setup: Result<String, String> = async {
+        let started = if let Some(thread_id) = config
+            .resume_thread_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            let mut resume_options = thread_options.clone();
+            resume_options["threadId"] = Value::String(thread_id.to_owned());
+            runtime
+                .request("thread/resume", resume_options)
+                .await
+                .map_err(|error| format!("无法续接原 Codex thread；原 thread id 已保留：{error}"))?
+        } else {
+            let mut start_options = thread_options;
+            start_options["ephemeral"] = Value::Bool(false);
+            runtime.request("thread/start", start_options).await?
+        };
+        let thread_id = started
+            .pointer("/thread/id")
+            .and_then(Value::as_str)
+            .ok_or("Codex 未返回 threadId")?
+            .to_owned();
+        Ok(thread_id)
+    }
+    .await;
+    let thread_id = match thread_setup {
+        Ok(thread_id) => thread_id,
+        Err(error) => return Err(fail_runtime_startup(&app, &state, &runtime, error).await),
+    };
+    *runtime.thread_id.write().await = Some(thread_id.clone());
+    if let Some(desired) = state.desired_runtime.lock().await.as_mut() {
+        desired.resume_thread_id = Some(thread_id);
+    }
+    transition_runtime_state(
+        &app,
+        RuntimeEvent::ThreadReady,
+        RuntimeTransitionDetails {
+            pid: runtime.control.pid(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let stable_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(stability_reset_interval()).await;
+        let state = stable_app.state::<AppState>();
+        if RuntimeGeneration(state.runtime_generation.load(Ordering::SeqCst)) == generation
+            && state.runtime_status.read().await.state == RuntimeState::Ready
+        {
+            state.runtime_status.write().await.restart_attempts = 0;
+            transition_runtime_state(
+                &stable_app,
+                RuntimeEvent::StableIntervalElapsed,
+                RuntimeTransitionDetails::default(),
+            )
+            .await;
+        }
+    });
+    Ok(runtime)
 }
 
 async fn ensure_runtime(
@@ -970,7 +1510,16 @@ async fn ensure_runtime(
     selected_codex_binary: Option<&str>,
 ) -> Result<Arc<CodexRuntime>, String> {
     let workspace = validated_workspace(cwd)?;
-    let cwd = workspace.id.as_str().to_owned();
+    let current_status = state.runtime_status.read().await.state;
+    if matches!(
+        current_status,
+        RuntimeState::Starting | RuntimeState::Dead | RuntimeState::Restarting
+    ) {
+        return Err(request_rejection(current_status)
+            .expect("non-ready runtime state must reject requests")
+            .code()
+            .to_owned());
+    }
     let codex_binary = codex_binary_path(&app, selected_codex_binary)?;
     let existing = { state.runtime.lock().await.clone() };
     if let Some(existing) = existing {
@@ -978,56 +1527,31 @@ async fn ensure_runtime(
             && existing.speech_style == speech_style
             && existing.workspace == workspace.id
             && existing.codex_binary == codex_binary
+            && state.runtime_status.read().await.state == RuntimeState::Ready
         {
             return Ok(existing);
         }
-        terminate_runtime(state).await?;
+        terminate_runtime(&app, state, false).await?;
     }
-    let profile = permission_mode.profile();
-    let runtime = CodexRuntime::spawn(
-        app,
+    let config = RuntimeLaunchConfig {
         permission_mode,
         speech_style,
-        workspace.id.clone(),
+        workspace: workspace.id,
         codex_binary,
-    )
-    .await?;
-    runtime.request("initialize", json!({
-        "clientInfo": {"name": "jarvis-codex", "title": "Jarvis Codex", "version": env!("CARGO_PKG_VERSION")},
-        "capabilities": {"experimentalApi": true}
-    })).await?;
-    runtime.notify("initialized", json!({})).await?;
-    let thread_options = json!({
-        "cwd": cwd,
-        "approvalPolicy": profile.approval_policy,
-        "sandbox": profile.sandbox,
-        "baseInstructions": format!(
-            "You are Codex speaking through the local Jarvis interface. Keep voice replies concise and natural, execute real tasks with Codex tools when asked, report progress while work continues, and accept spoken corrections in the same thread. {} {}",
-            speech_style.instructions(),
-            profile.instructions
-        )
-    });
-    let started = if let Some(thread_id) = resume_thread_id.filter(|value| !value.trim().is_empty())
-    {
-        let mut resume_options = thread_options.clone();
-        resume_options["threadId"] = Value::String(thread_id.to_owned());
-        runtime
-            .request("thread/resume", resume_options)
-            .await
-            .map_err(|error| format!("无法续接原 Codex thread；原 thread id 已保留：{error}"))?
-    } else {
-        let mut start_options = thread_options;
-        start_options["ephemeral"] = Value::Bool(false);
-        runtime.request("thread/start", start_options).await?
+        resume_thread_id: resume_thread_id.map(str::to_owned),
     };
-    let thread_id = started
-        .pointer("/thread/id")
-        .and_then(Value::as_str)
-        .ok_or("Codex 未返回 threadId")?
-        .to_owned();
-    *runtime.thread_id.write().await = Some(thread_id.clone());
-    *state.runtime.lock().await = Some(runtime.clone());
-    Ok(runtime)
+    *state.desired_runtime.lock().await = Some(config.clone());
+    if state.runtime_status.read().await.state == RuntimeState::Failed {
+        state.runtime_status.write().await.restart_attempts = 0;
+        transition_runtime_state(
+            &app,
+            RuntimeEvent::ManualRetry,
+            RuntimeTransitionDetails::default(),
+        )
+        .await;
+    }
+    let generation = RuntimeGeneration(state.runtime_generation.fetch_add(1, Ordering::SeqCst) + 1);
+    launch_runtime(app, config, generation, 0).await
 }
 
 #[tauri::command]
@@ -1234,8 +1758,8 @@ async fn resolve_server_request(
 }
 
 #[tauri::command]
-async fn shutdown(state: State<'_, AppState>) -> Result<(), String> {
-    terminate_runtime(&state).await
+async fn shutdown(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    terminate_runtime(&app, &state, true).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1257,6 +1781,11 @@ pub fn run() {
         }))
         .manage(AppState {
             runtime: Mutex::new(None),
+            runtime_status: RwLock::new(RuntimeStateInfo::default()),
+            runtime_generation: AtomicU64::new(0),
+            desired_runtime: Mutex::new(None),
+            process_spawner: Arc::new(SystemProcessSpawner),
+            log_lock: StdMutex::new(()),
             cold_wake_pending: AtomicBool::new(cold_wake_pending),
             background_start,
             wake_enabled: AtomicBool::new(false),
@@ -1271,6 +1800,7 @@ pub fn run() {
             disarm_wake_listener,
             wake_listener_status,
             consume_cold_wake,
+            runtime_state,
             default_workspace,
             validate_workspace,
             startup_is_background,

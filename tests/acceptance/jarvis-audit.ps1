@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
 Jarvis 只读实机取证脚本：汇总结构化日志、输出脱敏配置摘要、抓取进程树与系统信息。
 
@@ -26,11 +26,14 @@ function Write-Report {
 
 function Find-Latest {
     param([string]$FileName)
-    $candidates = Get-ChildItem -Path $env:APPDATA -Recurse -File -Filter $FileName -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch '\\Codex\\' }
-    $jarvis = $candidates | Where-Object { $_.FullName -match 'jarvis' } |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($jarvis) { return $jarvis.FullName }
+    $candidates = Get-ChildItem -Path $env:APPDATA -Recurse -File -Filter $FileName -ErrorAction SilentlyContinue
+    # 日志文件名本身是 Jarvis 专属；settings.json 则只认路径含 jarvis 的，
+    # 绝不回退到其他应用的配置。
+    if ($FileName -eq 'settings.json') {
+        $candidates = $candidates | Where-Object {
+            $_.FullName -match 'jarvis' -and $_.FullName -notmatch '\\Codex\\'
+        }
+    }
     return ($candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
 }
 

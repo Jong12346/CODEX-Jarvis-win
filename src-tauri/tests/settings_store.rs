@@ -211,6 +211,21 @@ fn import_legacy_keeps_distinct_directories_separate() {
 }
 
 #[test]
+fn import_legacy_ignores_empty_strings_keeping_defaults() {
+    let snapshot = json!({
+        "jarvis.workspace": r"C:\Users\DELL\proj",
+        "jarvis.permissionMode": "",
+        "jarvis.speechStyle": "",
+        "jarvis.codexBinary": "",
+        r"jarvis.threadId:C:\Users\DELL\proj": "t-1",
+    });
+    let settings = import_legacy(&snapshot, Platform::Windows, &CaseFoldingProbe);
+    assert_eq!(settings.permission_mode, "safe");
+    assert_eq!(settings.speech_style, "mandarin");
+    assert_eq!(settings.codex_binary, None);
+}
+
+#[test]
 fn import_legacy_missing_fields_stay_defaults() {
     let settings = import_legacy(&json!({}), Platform::Windows, &AnyDir);
     assert_eq!(settings.permission_mode, "safe");

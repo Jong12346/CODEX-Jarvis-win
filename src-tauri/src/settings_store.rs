@@ -146,13 +146,25 @@ pub fn import_legacy(snapshot: &Value, platform: Platform, probe: &dyn PathProbe
             settings.workspace = Some(resolved.id.as_str().to_owned());
         }
     }
-    if let Some(permission) = obj.get("jarvis.permissionMode").and_then(Value::as_str) {
+    if let Some(permission) = obj
+        .get("jarvis.permissionMode")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
         settings.permission_mode = permission.to_owned();
     }
-    if let Some(style) = obj.get("jarvis.speechStyle").and_then(Value::as_str) {
+    if let Some(style) = obj
+        .get("jarvis.speechStyle")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
         settings.speech_style = style.to_owned();
     }
-    if let Some(binary) = obj.get("jarvis.codexBinary").and_then(Value::as_str) {
+    if let Some(binary) = obj
+        .get("jarvis.codexBinary")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
         settings.codex_binary = Some(binary.to_owned());
     }
     let mut raw_mappings: Vec<(String, String, String)> = Vec::new();

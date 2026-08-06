@@ -1092,8 +1092,13 @@ $("#command-form").addEventListener("submit", async (event) => {
 });
 mic.addEventListener("click", () => {
   state.manualStop = false;
-  if (state.voice?.micOwner === "voice" || peer) void reportVoiceEvent("stopRequested");
-  else void reportVoiceEvent("wakeDetected");
+  if (state.voice?.state === "degraded") {
+    void reportVoiceEvent("retryRequested");
+  } else if (state.voice?.micOwner === "voice" || peer) {
+    void reportVoiceEvent("stopRequested");
+  } else {
+    void reportVoiceEvent("wakeDetected");
+  }
 });
 $("#stop").addEventListener("click", async () => {
   triggerCharacterAction("error", 700);

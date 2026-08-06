@@ -1873,7 +1873,13 @@ fn handle_tray_menu_event(app: &AppHandle, id: &str) {
         "wake" => {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                handle_voice_event(app.clone(), crate::app_shell::wake_entry()).await;
+                let state = app.state::<AppState>();
+                let event = if state.voice_status.read().await.state == VoiceState::Degraded {
+                    VoiceEvent::RetryRequested
+                } else {
+                    crate::app_shell::wake_entry()
+                };
+                handle_voice_event(app.clone(), event).await;
                 raise_jarvis_window(&app);
             });
         }
@@ -2482,7 +2488,7 @@ fn start_wake_supervisor(app: AppHandle) {
                     let _ = fs::write(&control_file, "release");
                 }
                 if let Some(requested_at) = release_requested_at {
-                    if requested_at.elapsed() >= Duration::from_secs(3) {
+                    if requested_at.elapsed() >= Duration::from_secs(5) {
                         // 兜底：释放请求超时，只产错误，不推进正常交接。
                         transition_voice_state(
                             &app,
@@ -2528,6 +2534,24 @@ fn start_wake_supervisor(app: AppHandle) {
                 }
             }
             let _ = child.wait().await;
+            // 内层循环在 wake 处提前退出，但 helper 退出前还会写 microphoneReleased；
+            // 释放判定前必须把剩余行读完，否则会把已确认的释放误判为超时。
+            let trailing = fs::read_to_string(&event_file).unwrap_or_default();
+            for line in trailing.lines().skip(processed) {
+                let Ok(message) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                match message.get("type").and_then(Value::as_str) {
+                    Some("microphoneReleased") => {
+                        mic_released = true;
+                        log_wake_protocol_event(&app, "wake.protocol.microphone_released");
+                    }
+                    Some("stopping") => {
+                        log_wake_protocol_event(&app, "wake.protocol.stopping");
+                    }
+                    _ => {}
+                }
+            }
             let _ = fs::remove_file(&event_file);
             let _ = fs::remove_file(&control_file);
             *state.wake_control_file.lock().await = None;

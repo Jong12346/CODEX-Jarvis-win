@@ -62,6 +62,9 @@ struct AppState {
     wake_supervisor_running: AtomicBool,
     wake_pid: AtomicU32,
     wake_authorization: RwLock<String>,
+    wake_release_requested: AtomicBool,
+    wake_control_file: Mutex<Option<PathBuf>>,
+    voice_status: RwLock<VoiceStateInfo>,
 }
 
 #[tauri::command]
@@ -460,6 +463,260 @@ fn log_wake_protocol_event(app: &AppHandle, event: &'static str) {
     );
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceStateInfo {
+    state: VoiceState,
+    mic_owner: MicOwner,
+    reconnect_attempts: u32,
+    degraded: Option<DegradedInfo>,
+}
+
+impl Default for VoiceStateInfo {
+    fn default() -> Self {
+        Self {
+            state: VoiceState::Booting,
+            mic_owner: MicOwner::None,
+            reconnect_attempts: 0,
+            degraded: None,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceTransitionLog<'a> {
+    schema_version: u8,
+    timestamp_ms: u128,
+    event: &'static str,
+    from: VoiceState,
+    to: VoiceState,
+    trigger: &'static str,
+    mic_owner: MicOwner,
+    reconnect_attempts: u32,
+    error_kind: Option<VoiceErrorKind>,
+    recoverable: Option<bool>,
+    suggested_action: Option<&'a str>,
+    error_owner: Option<MicOwner>,
+}
+
+/// 每次状态迁移：写 JSONL、emit 前端载荷、必要时自动重新布防唤醒。
+async fn transition_voice_state(app: &AppHandle, event: VoiceEvent) -> VoiceStateInfo {
+    let state = app.state::<AppState>();
+    let (from, info) = {
+        let mut info = state.voice_status.write().await;
+        let from = info.state;
+        let owner_before = mic_owner(from);
+        let next = voice_state_transition(from, event);
+        info.state = next;
+        info.mic_owner = mic_owner(next);
+        if event == VoiceEvent::ReconnectRequested && next == VoiceState::VoiceConnecting {
+            info.reconnect_attempts = info.reconnect_attempts.saturating_add(1);
+        }
+        if event == VoiceEvent::VoiceConnected {
+            info.reconnect_attempts = 0;
+        }
+        if let Some(degraded) = degraded_info(event, owner_before) {
+            info.degraded = Some(degraded);
+        } else if next != VoiceState::Degraded {
+            info.degraded = None;
+        }
+        (from, info.clone())
+    };
+    if info.state == VoiceState::VoiceAcquiringMicrophone {
+        schedule_voice_stage_timeout(
+            app,
+            VoiceState::VoiceAcquiringMicrophone,
+            VoiceEvent::Timeout {
+                stage: TimeoutStage::MicrophoneAcquire,
+            },
+            Duration::from_secs(15),
+        );
+    }
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    append_runtime_log(
+        app,
+        &VoiceTransitionLog {
+            schema_version: 1,
+            timestamp_ms,
+            event: "jarvis.voice.state_transition",
+            from,
+            to: info.state,
+            trigger: event.trigger(),
+            mic_owner: info.mic_owner,
+            reconnect_attempts: info.reconnect_attempts,
+            error_kind: info.degraded.map(|degraded| degraded.error_kind),
+            recoverable: info.degraded.map(|degraded| degraded.recoverable),
+            suggested_action: info.degraded.map(|degraded| degraded.suggested_action),
+            error_owner: info.degraded.map(|degraded| degraded.owner),
+        },
+    );
+    let _ = app.emit("jarvis-voice-state", info.clone());
+    if info.state == VoiceState::VoiceAcquiringMicrophone {
+        let _ = app.emit(
+            "jarvis-voice-may-acquire-microphone",
+            json!({"state": "voiceAcquiringMicrophone"}),
+        );
+    }
+    if matches!(info.state, VoiceState::WakeArming | VoiceState::WakeReady) {
+        start_wake_supervisor(app.clone());
+    }
+    info
+}
+
+fn schedule_voice_stage_timeout(
+    app: &AppHandle,
+    expected: VoiceState,
+    event: VoiceEvent,
+    delay: Duration,
+) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let state = app.state::<AppState>();
+        if state.voice_status.read().await.state == expected {
+            transition_voice_state(&app, event).await;
+        }
+    });
+}
+
+async fn request_wake_mic_release(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    state.wake_release_requested.store(true, Ordering::SeqCst);
+    let Some(path) = state.wake_control_file.lock().await.clone() else {
+        return;
+    };
+    let _ = fs::write(&path, "release");
+}
+
+/// STOP 与目录切换的有序关闭前缀：先停 realtime、打断 turn、清理后台终端，
+/// 再让状态机推进到 WakeRearming（由 VoiceStopped 驱动）。
+async fn stop_voice_runtime(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let Ok(runtime) = runtime(&state).await else {
+        return;
+    };
+    let Ok(thread_id) = runtime.thread().await else {
+        return;
+    };
+    let _ = runtime
+        .request("thread/realtime/stop", json!({"threadId": thread_id}))
+        .await;
+    let mut interrupted_turn: Option<String> = None;
+    for _ in 0..6 {
+        if let Some(turn_id) = runtime.active_turn.read().await.clone() {
+            if interrupted_turn.as_deref() != Some(turn_id.as_str()) {
+                let _ = runtime
+                    .request(
+                        "turn/interrupt",
+                        json!({"threadId": thread_id, "turnId": turn_id}),
+                    )
+                    .await;
+                interrupted_turn = Some(turn_id);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    if let Ok(background) = runtime
+        .request(
+            "thread/backgroundTerminals/list",
+            json!({"threadId": thread_id, "limit": 100}),
+        )
+        .await
+    {
+        if let Some(terminals) = background.get("data").and_then(Value::as_array) {
+            for terminal in terminals {
+                if let Some(process_id) = terminal.get("processId").and_then(Value::as_str) {
+                    let _ = runtime
+                        .request(
+                            "thread/backgroundTerminals/terminate",
+                            json!({"threadId": thread_id, "processId": process_id}),
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+    runtime.voice_active.store(false, Ordering::SeqCst);
+    *runtime.voice_phase.write().await = "closed".to_owned();
+    *runtime.realtime_session_id.write().await = None;
+}
+
+/// 前端事件入口（report_voice_event 命令与 sidecar 命中共用）。
+async fn handle_voice_event(app: AppHandle, event: VoiceEvent) -> VoiceStateInfo {
+    match event {
+        VoiceEvent::WakeDetected => {
+            transition_voice_state(&app, VoiceEvent::WakeDetected).await;
+            let info = transition_voice_state(&app, VoiceEvent::WakeReleaseRequested).await;
+            if info.state == VoiceState::WakeReleasingMicrophone {
+                request_wake_mic_release(&app).await;
+            }
+            info
+        }
+        VoiceEvent::StopRequested | VoiceEvent::WorkspaceSwitchRequested => {
+            let info = transition_voice_state(&app, event).await;
+            if info.state == VoiceState::VoiceStopping {
+                stop_voice_runtime(&app).await;
+                transition_voice_state(&app, VoiceEvent::VoiceStopped).await
+            } else {
+                info
+            }
+        }
+        VoiceEvent::VoiceMicrophoneAcquired => {
+            let info = transition_voice_state(&app, event).await;
+            if info.state == VoiceState::VoiceConnecting {
+                schedule_voice_stage_timeout(
+                    &app,
+                    VoiceState::VoiceConnecting,
+                    VoiceEvent::Timeout {
+                        stage: TimeoutStage::VoiceConnect,
+                    },
+                    Duration::from_secs(20),
+                );
+            }
+            info
+        }
+        VoiceEvent::RetryRequested => {
+            let info = transition_voice_state(&app, event).await;
+            if info.state == VoiceState::Booting {
+                transition_voice_state(&app, VoiceEvent::BootCompleted).await
+            } else {
+                info
+            }
+        }
+        _ => transition_voice_state(&app, event).await,
+    }
+}
+
+/// 集成层会话重置：仅在 Stopping/Degraded 终态后由前端主动发起新会话时使用，
+/// 不属于纯状态机的迁移，不写状态迁移日志。
+async fn reset_voice_machine(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let mut info = state.voice_status.write().await;
+    if !matches!(info.state, VoiceState::Stopping | VoiceState::Degraded) {
+        return;
+    }
+    info.state = VoiceState::Booting;
+    info.mic_owner = MicOwner::None;
+    info.reconnect_attempts = 0;
+    info.degraded = None;
+    let _ = app.emit("jarvis-voice-state", info.clone());
+}
+
+#[tauri::command]
+async fn voice_state(state: State<'_, AppState>) -> Result<VoiceStateInfo, String> {
+    Ok(state.voice_status.read().await.clone())
+}
+
+#[tauri::command]
+async fn report_voice_event(app: AppHandle, event: String) -> Result<VoiceStateInfo, String> {
+    let event = VoiceEvent::from_trigger(&event).ok_or("unknown voice event")?;
+    Ok(handle_voice_event(app, event).await)
+}
+
 async fn transition_runtime_state(
     app: &AppHandle,
     event: RuntimeEvent,
@@ -546,8 +803,12 @@ fn start_runtime_watchers(app: AppHandle, runtime: &Arc<CodexRuntime>, io: Runti
                             .pointer("/params/turn/id")
                             .and_then(Value::as_str)
                             .map(str::to_owned);
+                        transition_voice_state(&event_app, VoiceEvent::TurnStarted).await;
                     }
-                    Some("turn/completed") => *runtime.active_turn.write().await = None,
+                    Some("turn/completed") => {
+                        *runtime.active_turn.write().await = None;
+                        transition_voice_state(&event_app, VoiceEvent::TurnCompleted).await;
+                    }
                     Some("thread/realtime/started") => {
                         runtime.voice_active.store(true, Ordering::SeqCst);
                         *runtime.voice_phase.write().await = "connected".to_owned();
@@ -555,15 +816,29 @@ fn start_runtime_watchers(app: AppHandle, runtime: &Arc<CodexRuntime>, io: Runti
                             .pointer("/params/realtimeSessionId")
                             .and_then(Value::as_str)
                             .map(str::to_owned);
+                        transition_voice_state(&event_app, VoiceEvent::VoiceConnected).await;
                     }
                     Some("thread/realtime/error") => {
                         runtime.voice_active.store(false, Ordering::SeqCst);
                         *runtime.voice_phase.write().await = "error".to_owned();
+                        let voice = event_app
+                            .state::<AppState>()
+                            .voice_status
+                            .read()
+                            .await
+                            .clone();
+                        if is_reconnect_allowed(voice.state) && voice.reconnect_attempts < 3 {
+                            transition_voice_state(&event_app, VoiceEvent::ReconnectRequested)
+                                .await;
+                        } else {
+                            transition_voice_state(&event_app, VoiceEvent::RealtimeError).await;
+                        }
                     }
                     Some("thread/realtime/closed") => {
                         runtime.voice_active.store(false, Ordering::SeqCst);
                         *runtime.voice_phase.write().await = "closed".to_owned();
                         *runtime.realtime_session_id.write().await = None;
+                        transition_voice_state(&event_app, VoiceEvent::VoiceStopped).await;
                     }
                     _ => {}
                 }
@@ -1125,6 +1400,7 @@ fn start_wake_supervisor(app: AppHandle) {
         return;
     }
     state.wake_enabled.store(true, Ordering::SeqCst);
+    state.wake_release_requested.store(false, Ordering::SeqCst);
 
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
@@ -1153,7 +1429,12 @@ fn start_wake_supervisor(app: AppHandle) {
             state.wake_ready.store(false, Ordering::SeqCst);
             let event_file =
                 std::env::temp_dir().join(format!("jarvis-wake-{}.jsonl", std::process::id()));
+            let control_file =
+                std::env::temp_dir().join(format!("jarvis-wake-{}.ctl", std::process::id()));
+            *state.wake_control_file.lock().await = Some(control_file.clone());
+            state.wake_release_requested.store(false, Ordering::SeqCst);
             let _ = fs::remove_file(&event_file);
+            let _ = fs::remove_file(&control_file);
             if let Err(error) = fs::write(&event_file, "") {
                 *state.wake_authorization.write().await = format!("无法创建唤醒事件通道：{error}");
                 break;
@@ -1183,6 +1464,7 @@ fn start_wake_supervisor(app: AppHandle) {
             let mut command = {
                 let mut command = Command::new(&helper);
                 command.arg("--event-file").arg(&event_file);
+                command.arg("--control-file").arg(&control_file);
                 command
             };
             let mut child = match command
@@ -1203,6 +1485,9 @@ fn start_wake_supervisor(app: AppHandle) {
                 .wake_pid
                 .store(child.id().unwrap_or(0), Ordering::SeqCst);
             let mut processed = 0usize;
+            let mut mic_released = false;
+            let spawned_at = std::time::Instant::now();
+            let mut release_requested_at: Option<std::time::Instant> = None;
 
             loop {
                 let content = fs::read_to_string(&event_file).unwrap_or_default();
@@ -1228,12 +1513,22 @@ fn start_wake_supervisor(app: AppHandle) {
                         }
                         Some("ready") => {
                             state.wake_ready.store(true, Ordering::SeqCst);
+                            transition_voice_state(&app, VoiceEvent::WakeArmed).await;
                         }
                         Some("wake") => {
                             woke = true;
                             state.wake_enabled.store(false, Ordering::SeqCst);
                             state.wake_ready.store(false, Ordering::SeqCst);
                             raise_jarvis_window(&app);
+                            // 按钮、快捷键与 sidecar 命中共用同一入口。
+                            handle_voice_event(app.clone(), VoiceEvent::WakeDetected).await;
+                        }
+                        Some("stopping") => {
+                            log_wake_protocol_event(&app, "wake.protocol.stopping");
+                        }
+                        Some("microphoneReleased") => {
+                            mic_released = true;
+                            log_wake_protocol_event(&app, "wake.protocol.microphone_released");
                         }
                         Some("error") => {
                             *state.wake_authorization.write().await = message
@@ -1243,6 +1538,7 @@ fn start_wake_supervisor(app: AppHandle) {
                                 .to_owned();
                             state.wake_enabled.store(false, Ordering::SeqCst);
                             state.wake_ready.store(false, Ordering::SeqCst);
+                            transition_voice_state(&app, VoiceEvent::WakeError).await;
                         }
                         _ => {
                             log_wake_protocol_event(&app, "wake.protocol.unknown_type");
@@ -1259,6 +1555,39 @@ fn start_wake_supervisor(app: AppHandle) {
                     break;
                 }
                 if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                let release_requested = state.wake_release_requested.load(Ordering::SeqCst);
+                if release_requested && release_requested_at.is_none() {
+                    release_requested_at = Some(std::time::Instant::now());
+                    let _ = fs::write(&control_file, "release");
+                }
+                if let Some(requested_at) = release_requested_at {
+                    if requested_at.elapsed() >= Duration::from_secs(3) {
+                        // 兜底：释放请求超时，只产错误，不推进正常交接。
+                        transition_voice_state(
+                            &app,
+                            VoiceEvent::Timeout {
+                                stage: TimeoutStage::MicrophoneRelease,
+                            },
+                        )
+                        .await;
+                        state.wake_enabled.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                }
+                if !release_requested
+                    && !state.wake_ready.load(Ordering::SeqCst)
+                    && spawned_at.elapsed() >= Duration::from_secs(10)
+                {
+                    transition_voice_state(
+                        &app,
+                        VoiceEvent::Timeout {
+                            stage: TimeoutStage::WakeArm,
+                        },
+                    )
+                    .await;
+                    state.wake_enabled.store(false, Ordering::SeqCst);
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1281,8 +1610,39 @@ fn start_wake_supervisor(app: AppHandle) {
             }
             let _ = child.wait().await;
             let _ = fs::remove_file(&event_file);
+            let _ = fs::remove_file(&control_file);
+            *state.wake_control_file.lock().await = None;
             state.wake_pid.store(0, Ordering::SeqCst);
-            if woke || !state.wake_enabled.load(Ordering::SeqCst) {
+            let release_was_requested = woke
+                || state.wake_release_requested.load(Ordering::SeqCst)
+                || release_requested_at.is_some();
+            state.wake_release_requested.store(false, Ordering::SeqCst);
+
+            // 交接确认：sidecar 已退出且麦克风释放确认齐备后，才允许 Voice 获取。
+            #[cfg(not(target_os = "windows"))]
+            let mic_released = mic_released || woke;
+            let releasing =
+                state.voice_status.read().await.state == VoiceState::WakeReleasingMicrophone;
+            if releasing && mic_released {
+                transition_voice_state(&app, VoiceEvent::MicrophoneReleased).await;
+                state.wake_enabled.store(false, Ordering::SeqCst);
+            } else if releasing && release_was_requested {
+                // 已请求释放但未收到确认，只产错误、不推进正常交接。
+                transition_voice_state(
+                    &app,
+                    VoiceEvent::Timeout {
+                        stage: TimeoutStage::MicrophoneRelease,
+                    },
+                )
+                .await;
+                state.wake_enabled.store(false, Ordering::SeqCst);
+            }
+            if !state.wake_enabled.load(Ordering::SeqCst)
+                || !matches!(
+                    state.voice_status.read().await.state,
+                    VoiceState::WakeArming | VoiceState::WakeReady
+                )
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -1292,19 +1652,24 @@ fn start_wake_supervisor(app: AppHandle) {
         state.wake_supervisor_running.store(false, Ordering::SeqCst);
         if woke {
             // The WebView owns the RTCPeerConnection, so wake only raises the
-            // Jarvis surface and asks the renderer to begin the official Codex
-            // app-server V3 Voice handshake. No keypress or UI automation.
+            // Jarvis surface; the voice handshake begins when the backend emits
+            // jarvis-voice-may-acquire-microphone. No keypress or UI automation.
             let _ = app.emit("jarvis-wake", json!({"ok": true}));
         }
         let _ = app.emit("jarvis-wake-status", wake_status_value(&state).await);
     });
 }
-
 #[tauri::command]
 async fn arm_wake_listener(app: AppHandle) -> Result<WakeStatus, String> {
+    // 新会话：终态（Stopping/Degraded）由集成层重置，再从 Booting 进入布防。
+    reset_voice_machine(&app).await;
+    let state = app.state::<AppState>();
+    if state.voice_status.read().await.state == VoiceState::Booting {
+        transition_voice_state(&app, VoiceEvent::BootCompleted).await;
+    }
     start_wake_supervisor(app.clone());
     tokio::time::sleep(Duration::from_millis(80)).await;
-    Ok(wake_status_value(&app.state::<AppState>()).await)
+    Ok(wake_status_value(&state).await)
 }
 
 #[tauri::command]
@@ -1974,12 +2339,17 @@ pub fn run() {
             wake_supervisor_running: AtomicBool::new(false),
             wake_pid: AtomicU32::new(0),
             wake_authorization: RwLock::new("notDetermined".to_owned()),
+            wake_release_requested: AtomicBool::new(false),
+            wake_control_file: Mutex::new(None),
+            voice_status: RwLock::new(VoiceStateInfo::default()),
         })
         .invoke_handler(tauri::generate_handler![
             direct_voice_status,
             arm_wake_listener,
             disarm_wake_listener,
             wake_listener_status,
+            voice_state,
+            report_voice_event,
             consume_cold_wake,
             runtime_state,
             default_workspace,

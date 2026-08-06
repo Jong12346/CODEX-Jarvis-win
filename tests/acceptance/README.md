@@ -1,4 +1,4 @@
-﻿# Jarvis 实机验收（tests/acceptance）
+# Jarvis 实机验收（tests/acceptance）
 
 本目录是 Windows 11 真机验收部分，与自动化契约测试（`src-tauri/tests/`）互补：
 
@@ -11,6 +11,22 @@
 |---|---|
 | `CHECKLIST.md` | 逐阶段验收剧本：操作、通过标准、证据约定 |
 | `jarvis-audit.ps1` | 只读取证脚本：日志汇总、配置摘要（脱敏）、进程树、系统/WebView2 信息 |
+| `../verify_log`（src-tauri/examples/verify_log.rs） | 日志校验器：用真实状态机回放 JSONL，标出非法 Voice 迁移与非法 STOP 动作 |
+
+## 日志自动判定
+
+取证脚本负责抓取，校验器负责判定（直接调用 `voice_state_transition` 与
+`next_stop_action`，不是另写一套逻辑）：
+
+```powershell
+cargo run --manifest-path src-tauri/Cargo.toml --example verify_log -- "$env:APPDATA\*\logs\jarvis-runtime.jsonl"
+```
+
+- 校验 1：每条 `jarvis.voice.state_transition` 的 from/trigger/to 必须与状态机一致。
+- 校验 2：每条 `jarvis.stop_sequence.action` 的 step/action/childAlive/graceElapsed
+  必须与决策函数一致（跳步、提前杀树都会被标出）。
+- 退出码：0 = 全通过；1 = 有违规（行号 + 期望/实际）；2 = 文件无法读取。
+- 也可用环境变量 `JARVIS_LOG_PATH` 传路径。
 
 ## 使用
 

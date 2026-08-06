@@ -1,7 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[doc(hidden)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum VoiceState {
     Booting,
@@ -125,13 +125,35 @@ impl VoiceEvent {
     #[doc(hidden)]
     pub fn from_trigger(name: &str) -> Option<Self> {
         match name {
+            "bootCompleted" => Some(Self::BootCompleted),
+            "wakeArmed" => Some(Self::WakeArmed),
             "wakeDetected" => Some(Self::WakeDetected),
+            "wakeReleaseRequested" => Some(Self::WakeReleaseRequested),
+            "microphoneReleased" => Some(Self::MicrophoneReleased),
+            "voiceConnected" => Some(Self::VoiceConnected),
+            "turnStarted" => Some(Self::TurnStarted),
+            "turnCompleted" => Some(Self::TurnCompleted),
+            "voiceStopped" => Some(Self::VoiceStopped),
+            "wakeError" => Some(Self::WakeError),
+            "realtimeError" => Some(Self::RealtimeError),
+            "timeout.wakeArm" => Some(Self::Timeout {
+                stage: TimeoutStage::WakeArm,
+            }),
+            "timeout.microphoneRelease" => Some(Self::Timeout {
+                stage: TimeoutStage::MicrophoneRelease,
+            }),
+            "timeout.microphoneAcquire" => Some(Self::Timeout {
+                stage: TimeoutStage::MicrophoneAcquire,
+            }),
+            "timeout.voiceConnect" => Some(Self::Timeout {
+                stage: TimeoutStage::VoiceConnect,
+            }),
+            "retryRequested" => Some(Self::RetryRequested),
             "voiceMicrophoneAcquired" => Some(Self::VoiceMicrophoneAcquired),
             "allTracksEnded" => Some(Self::AllTracksEnded),
             "speakingStarted" => Some(Self::SpeakingStarted),
             "speakingEnded" => Some(Self::SpeakingEnded),
             "reconnectRequested" => Some(Self::ReconnectRequested),
-            "retryRequested" => Some(Self::RetryRequested),
             "stopRequested" => Some(Self::StopRequested),
             "workspaceSwitchRequested" => Some(Self::WorkspaceSwitchRequested),
             "microphoneAcquireTimeout" => Some(Self::Timeout {

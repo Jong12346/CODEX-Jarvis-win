@@ -32,6 +32,9 @@ pub trait ProcessControl: Send + Sync {
     fn pid(&self) -> Option<u32>;
     fn try_wait(&self) -> Result<Option<i32>, String>;
     fn start_kill(&self) -> Result<(), String>;
+    /// 精确终止本 runtime 的进程树。Windows 上使用 Job Object 的
+    /// TerminateJobObject；其他平台回退为直接子进程终止。
+    fn terminate_job_tree(&self) -> Result<(), String>;
 }
 
 pub(crate) struct SystemProcessSpawner;
@@ -110,6 +113,16 @@ impl ProcessControl for TokioProcessControl {
             .start_kill()
             .map_err(|error| error.to_string())
     }
+
+    fn terminate_job_tree(&self) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(job) = &self._job {
+                return job.terminate();
+            }
+        }
+        self.start_kill()
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -159,6 +172,14 @@ impl WindowsJob {
                 .map_err(|error| format!("无法把 Codex 加入 Job Object：{error}"))?;
         }
         Ok(job)
+    }
+
+    fn terminate(&self) -> Result<(), String> {
+        use windows::Win32::System::JobObjects::TerminateJobObject;
+        unsafe {
+            TerminateJobObject(self.handle, 1)
+                .map_err(|error| format!("无法终止 Codex Job Object 进程树：{error}"))
+        }
     }
 }
 

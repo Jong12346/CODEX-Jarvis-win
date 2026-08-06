@@ -71,6 +71,8 @@ struct AppState {
     wake_release_requested: AtomicBool,
     wake_control_file: Mutex<Option<PathBuf>>,
     voice_status: RwLock<VoiceStateInfo>,
+    stop_step: RwLock<StopStep>,
+    stop_sequence_running: AtomicBool,
 }
 
 #[tauri::command]
@@ -600,55 +602,148 @@ async fn request_wake_mic_release(app: &AppHandle) {
 
 /// STOP 与目录切换的有序关闭前缀：先停 realtime、打断 turn、清理后台终端，
 /// 再让状态机推进到 WakeRearming（由 VoiceStopped 驱动）。
-async fn stop_voice_runtime(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    let Ok(runtime) = runtime(&state).await else {
-        return;
-    };
-    let Ok(thread_id) = runtime.thread().await else {
-        return;
-    };
-    let _ = runtime
-        .request("thread/realtime/stop", json!({"threadId": thread_id}))
-        .await;
-    let mut interrupted_turn: Option<String> = None;
-    for _ in 0..6 {
-        if let Some(turn_id) = runtime.active_turn.read().await.clone() {
-            if interrupted_turn.as_deref() != Some(turn_id.as_str()) {
-                let _ = runtime
-                    .request(
-                        "turn/interrupt",
-                        json!({"threadId": thread_id, "turnId": turn_id}),
-                    )
-                    .await;
-                interrupted_turn = Some(turn_id);
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    }
-    if let Ok(background) = runtime
-        .request(
-            "thread/backgroundTerminals/list",
-            json!({"threadId": thread_id, "limit": 100}),
-        )
-        .await
-    {
-        if let Some(terminals) = background.get("data").and_then(Value::as_array) {
-            for terminal in terminals {
-                if let Some(process_id) = terminal.get("processId").and_then(Value::as_str) {
-                    let _ = runtime
-                        .request(
-                            "thread/backgroundTerminals/terminate",
-                            json!({"threadId": thread_id, "processId": process_id}),
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StopSequenceLog<'a> {
+    schema_version: u8,
+    timestamp_ms: u128,
+    event: &'static str,
+    runtime_id: Option<&'a str>,
+    thread_id: Option<&'a str>,
+    pid: Option<u32>,
+    step: StopStep,
+    action: StopAction,
+    child_alive: bool,
+    grace_elapsed: bool,
+    terminated_pids: Vec<u32>,
+}
+
+fn log_stop_sequence_action(app: &AppHandle, record: &StopSequenceLog<'_>) {
+    append_runtime_log(app, record);
+}
+
+/// STOP / 目录切换 / 权限或 Codex 路径切换的有序关闭驱动：
+/// thread/realtime/stop -> turn/interrupt -> 短宽限期 -> 若本 runtime 进程树
+/// 仍存活则用 Job Object 精确终止 -> 按原 thread 重建 app-server -> VoiceStopped。
+fn run_stop_sequence(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let Some(runtime) = state.runtime.lock().await.clone() else {
+            transition_voice_state(&app, VoiceEvent::VoiceStopped).await;
+            state.stop_sequence_running.store(false, Ordering::SeqCst);
+            return;
+        };
+        // 让旧代 watcher 失效，避免杀树/自退被当成可自动重启的意外死亡。
+        state.runtime_generation.fetch_add(1, Ordering::SeqCst);
+        let thread_id = runtime.thread_id.read().await.clone();
+        let runtime_id = state.runtime_status.read().await.runtime_id.clone();
+        let mut step = {
+            let mut guard = state.stop_step.write().await;
+            *guard = on_stop_triggered(*guard);
+            *guard
+        };
+        let mut grace_started_at: Option<std::time::Instant> = None;
+        let mut killed_once = false;
+        loop {
+            let child_alive = runtime.control.try_wait().ok().flatten().is_none();
+            let grace_elapsed = grace_started_at
+                .map(|started| started.elapsed() >= STOP_GRACE)
+                .unwrap_or(false);
+            let action = next_stop_action(step, child_alive, grace_elapsed);
+            let terminated_pids = if matches!(action, StopAction::KillJobTree) {
+                runtime.control.pid().into_iter().collect()
+            } else {
+                Vec::new()
+            };
+            let timestamp_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            log_stop_sequence_action(
+                &app,
+                &StopSequenceLog {
+                    schema_version: 1,
+                    timestamp_ms,
+                    event: "jarvis.stop_sequence.action",
+                    runtime_id: runtime_id.as_deref(),
+                    thread_id: thread_id.as_deref(),
+                    pid: runtime.control.pid(),
+                    step,
+                    action,
+                    child_alive,
+                    grace_elapsed,
+                    terminated_pids,
+                },
+            );
+            match action {
+                StopAction::SendRealtimeStop => {
+                    if let Some(thread) = thread_id.as_deref() {
+                        let _ = runtime
+                            .request("thread/realtime/stop", json!({"threadId": thread}))
+                            .await;
+                    }
+                }
+                StopAction::SendTurnInterrupt => {
+                    if let Some(thread) = thread_id.as_deref() {
+                        if let Some(turn_id) = runtime.active_turn.read().await.clone() {
+                            let _ = runtime
+                                .request(
+                                    "turn/interrupt",
+                                    json!({"threadId": thread, "turnId": turn_id}),
+                                )
+                                .await;
+                        }
+                    }
+                }
+                StopAction::WaitGrace => {
+                    grace_started_at.get_or_insert_with(std::time::Instant::now);
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+                StopAction::KillJobTree => {
+                    if !killed_once {
+                        killed_once = true;
+                        runtime.terminal_observed.store(true, Ordering::SeqCst);
+                        runtime.fail_pending("runtime_stopping").await;
+                        runtime.reset_voice_state().await;
+                        runtime.voice_active.store(false, Ordering::SeqCst);
+                        *runtime.voice_phase.write().await = "closed".to_owned();
+                        *runtime.realtime_session_id.write().await = None;
+                        {
+                            let mut active = state.runtime.lock().await;
+                            if active
+                                .as_ref()
+                                .is_some_and(|candidate| Arc::ptr_eq(candidate, &runtime))
+                            {
+                                active.take();
+                            }
+                        }
+                        transition_runtime_state(
+                            &app,
+                            RuntimeEvent::ShutdownRequested,
+                            RuntimeTransitionDetails::default(),
                         )
                         .await;
+                    }
+                    let _ = runtime.control.terminate_job_tree();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
+                StopAction::Rebuild => {
+                    let config = state.desired_runtime.lock().await.clone();
+                    if let Some(config) = config {
+                        let generation = RuntimeGeneration(
+                            state.runtime_generation.fetch_add(1, Ordering::SeqCst) + 1,
+                        );
+                        let _ = launch_runtime(app.clone(), config, generation, 0).await;
+                    }
+                }
+                StopAction::Done => break,
             }
+            step = advance_stop_step(step, action);
         }
-    }
-    runtime.voice_active.store(false, Ordering::SeqCst);
-    *runtime.voice_phase.write().await = "closed".to_owned();
-    *runtime.realtime_session_id.write().await = None;
+        *state.stop_step.write().await = step;
+        transition_voice_state(&app, VoiceEvent::VoiceStopped).await;
+        state.stop_sequence_running.store(false, Ordering::SeqCst);
+    });
 }
 
 /// 前端事件入口（report_voice_event 命令与 sidecar 命中共用）。
@@ -664,12 +759,15 @@ async fn handle_voice_event(app: AppHandle, event: VoiceEvent) -> VoiceStateInfo
         }
         VoiceEvent::StopRequested | VoiceEvent::WorkspaceSwitchRequested => {
             let info = transition_voice_state(&app, event).await;
-            if info.state == VoiceState::VoiceStopping {
-                stop_voice_runtime(&app).await;
-                transition_voice_state(&app, VoiceEvent::VoiceStopped).await
-            } else {
-                info
+            if info.state == VoiceState::VoiceStopping
+                && !app
+                    .state::<AppState>()
+                    .stop_sequence_running
+                    .swap(true, Ordering::SeqCst)
+            {
+                run_stop_sequence(app.clone());
             }
+            info
         }
         VoiceEvent::VoiceMicrophoneAcquired => {
             let info = transition_voice_state(&app, event).await;
@@ -2348,6 +2446,8 @@ pub fn run() {
             wake_release_requested: AtomicBool::new(false),
             wake_control_file: Mutex::new(None),
             voice_status: RwLock::new(VoiceStateInfo::default()),
+            stop_step: RwLock::new(StopStep::Start),
+            stop_sequence_running: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             direct_voice_status,

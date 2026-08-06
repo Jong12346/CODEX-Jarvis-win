@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Diagnostics;
 using System.Speech.Recognition;
 using System.Text;
 using System.Threading;
@@ -32,6 +33,35 @@ internal static class JarvisWakeListener
         string controlFile = Argument(args, "--control-file");
         bool testWake = args.Any(value => value == "--test-wake");
         bool testRelease = args.Any(value => value == "--test-release");
+        int parentPid = 0;
+        int.TryParse(Argument(args, "--parent-pid"), out parentPid);
+        if (parentPid > 0)
+        {
+            // If the Jarvis host dies without a chance to kill this helper,
+            // exit on our own: an orphaned helper keeps the microphone and
+            // locks JarvisWakeListener.exe so the next build cannot overwrite it.
+            Thread watcher = new Thread(() =>
+            {
+                while (true)
+                {
+                    Thread.Sleep(1000);
+                    try
+                    {
+                        using (Process process = Process.GetProcessById(parentPid))
+                        {
+                            if (process.HasExited) throw new InvalidOperationException("parent exited");
+                        }
+                    }
+                    catch
+                    {
+                        Emit("stopping", "reason", "parent_exit");
+                        Environment.Exit(2);
+                    }
+                }
+            });
+            watcher.IsBackground = true;
+            watcher.Start();
+        }
         try
         {
             if (!string.IsNullOrWhiteSpace(eventFile))

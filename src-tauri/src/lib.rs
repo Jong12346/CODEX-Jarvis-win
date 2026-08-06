@@ -2425,6 +2425,9 @@ fn start_wake_supervisor(app: AppHandle) {
                 command.arg("--event-file").arg(&event_file);
                 command.arg("--control-file").arg(&control_file);
                 command
+                    .arg("--parent-pid")
+                    .arg(std::process::id().to_string());
+                command
             };
             let mut child = match command
                 .stdin(Stdio::null())

@@ -21,6 +21,8 @@ use tokio::{
     time::{timeout, Duration},
 };
 
+#[doc(hidden)]
+pub mod app_shell;
 mod diagnostics;
 mod process;
 mod runtime_state;

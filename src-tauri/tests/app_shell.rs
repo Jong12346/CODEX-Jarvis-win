@@ -1,4 +1,4 @@
-﻿//! Phase 6 contract: first-run wizard, tray menu and global hotkey shell.
+//! Phase 6 contract: first-run wizard, tray menu and global hotkey shell.
 //!
 //! Activation note (same as phases 1-5): this file lives here until the
 //! symbols exist, then the implementation commit moves it into
@@ -20,8 +20,7 @@
 use jarvis_codex_lib::{
     app_shell::{
         can_proceed, format_accelerator, has_conflict, parse_accelerator, reserved_accelerators,
-        tray_menu, wake_entry, wizard_steps, Accelerator, AcceleratorError, MenuItemSpec,
-        Modifier, WizardStep,
+        tray_menu, wake_entry, wizard_steps, AcceleratorError, MenuItemSpec, Modifier, WizardStep,
     },
     voice_state_transition, ProbeResult, RuntimeState, VerdictLevel, VoiceEvent, VoiceState,
 };
@@ -42,7 +41,13 @@ fn wizard_steps_reuse_classify_and_keep_stable_order() {
     assert_eq!(
         ids,
         [
-            "windows", "webview2", "microphone", "speech_pack", "codex", "workspace", "network"
+            "windows",
+            "webview2",
+            "microphone",
+            "speech_pack",
+            "codex",
+            "workspace",
+            "network"
         ],
         "wizard step order must be stable"
     );
@@ -117,7 +122,12 @@ fn wizard_step_ids_are_stable_and_distinct() {
 
 #[test]
 fn tray_stop_is_disabled_without_a_live_voice() {
-    for runtime in [RuntimeState::Absent, RuntimeState::Starting, RuntimeState::Ready, RuntimeState::Dead] {
+    for runtime in [
+        RuntimeState::Absent,
+        RuntimeState::Starting,
+        RuntimeState::Ready,
+        RuntimeState::Dead,
+    ] {
         let menu = tray_menu(runtime, VoiceState::WakeReady);
         let stop = menu.iter().find(|item| item.id == "stop").unwrap();
         assert!(!stop.enabled, "{runtime:?} + WakeReady must disable STOP");
@@ -188,7 +198,13 @@ fn tray_wake_is_enabled_when_standby() {
 
 #[test]
 fn tray_diagnostics_and_exit_are_always_enabled() {
-    for runtime in [RuntimeState::Absent, RuntimeState::Starting, RuntimeState::Ready, RuntimeState::Dead, RuntimeState::Failed] {
+    for runtime in [
+        RuntimeState::Absent,
+        RuntimeState::Starting,
+        RuntimeState::Ready,
+        RuntimeState::Dead,
+        RuntimeState::Failed,
+    ] {
         for voice in [
             VoiceState::Booting,
             VoiceState::WakeReady,
@@ -197,7 +213,12 @@ fn tray_diagnostics_and_exit_are_always_enabled() {
             VoiceState::Degraded,
         ] {
             let menu = tray_menu(runtime, voice);
-            assert!(menu.iter().find(|item| item.id == "diagnostics").unwrap().enabled);
+            assert!(
+                menu.iter()
+                    .find(|item| item.id == "diagnostics")
+                    .unwrap()
+                    .enabled
+            );
             assert!(menu.iter().find(|item| item.id == "exit").unwrap().enabled);
         }
     }
@@ -209,7 +230,15 @@ fn tray_menu_ids_are_stable_and_distinct() {
     let ids: Vec<&str> = menu.iter().map(|item| item.id).collect();
     assert_eq!(
         ids,
-        ["show", "hide", "wake", "textMode", "stop", "diagnostics", "exit"]
+        [
+            "show",
+            "hide",
+            "wake",
+            "textMode",
+            "stop",
+            "diagnostics",
+            "exit"
+        ]
     );
     let mut sorted = ids.clone();
     sorted.sort_unstable();
@@ -233,9 +262,15 @@ fn parse_accelerator_accepts_valid_combinations() {
 #[test]
 fn parse_accelerator_reports_structured_errors() {
     assert_eq!(parse_accelerator(""), Err(AcceleratorError::Empty));
-    assert_eq!(parse_accelerator("J"), Err(AcceleratorError::MissingModifier));
+    assert_eq!(
+        parse_accelerator("J"),
+        Err(AcceleratorError::MissingModifier)
+    );
     assert_eq!(parse_accelerator("Alt+"), Err(AcceleratorError::Empty));
-    assert_eq!(parse_accelerator("Alt+J+K"), Err(AcceleratorError::TooManyKeys));
+    assert_eq!(
+        parse_accelerator("Alt+J+K"),
+        Err(AcceleratorError::TooManyKeys)
+    );
     assert_eq!(
         parse_accelerator("Alt+~"),
         Err(AcceleratorError::InvalidKey)
@@ -259,7 +294,10 @@ fn accelerator_formatting_round_trips() {
 #[test]
 fn accelerator_conflicts_are_decidable() {
     let reserved = [parse_accelerator("Ctrl+Shift+J").unwrap()];
-    assert!(has_conflict(&parse_accelerator("Ctrl+Shift+J").unwrap(), &reserved));
+    assert!(has_conflict(
+        &parse_accelerator("Ctrl+Shift+J").unwrap(),
+        &reserved
+    ));
     assert!(
         has_conflict(&parse_accelerator("Shift+Ctrl+J").unwrap(), &reserved),
         "modifier order must not matter"

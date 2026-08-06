@@ -23,6 +23,7 @@ use tokio::{
 
 mod process;
 mod runtime_state;
+mod voice_state;
 mod workspace;
 
 use process::SystemProcessSpawner;
@@ -35,6 +36,10 @@ pub use runtime_state::{
     MAX_AUTO_RESTARTS,
 };
 #[doc(hidden)]
+pub use voice_state::{
+    degraded_info, is_reconnect_allowed, mic_owner, voice_state_transition, DegradedInfo, MicOwner,
+    TimeoutStage, VoiceErrorKind, VoiceEvent, VoiceState,
+};
 pub use workspace::{
     canonicalize_workspace, normalize_workspace_path, workspace_display, workspace_thread_key,
     PathProbe, Platform, ResolvedWorkspace, WorkspaceError, WorkspaceId,

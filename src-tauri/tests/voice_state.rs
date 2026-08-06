@@ -1,4 +1,4 @@
-﻿//! P0-2b contract: Wake/Voice deterministic microphone handoff state machine.
+//! P0-2b contract: Wake/Voice deterministic microphone handoff state machine.
 //!
 //! Activation note (identical to phase 1): these tests live here until the
 //! symbols exist, then the implementation commit moves this file into
@@ -23,8 +23,8 @@
 //!   entry event.
 
 use jarvis_codex_lib::{
-    degraded_info, is_reconnect_allowed, mic_owner, voice_state_transition, DegradedInfo,
-    MicOwner, TimeoutStage, VoiceErrorKind, VoiceEvent, VoiceState,
+    degraded_info, is_reconnect_allowed, mic_owner, voice_state_transition, DegradedInfo, MicOwner,
+    TimeoutStage, VoiceErrorKind, VoiceEvent, VoiceState,
 };
 
 const ALL_STATES: [VoiceState; 14] = [
@@ -94,7 +94,6 @@ fn mic_owner_is_total_and_single() {
         VoiceState::WakeReleasingMicrophone,
     ];
     let voice_owned = [
-        VoiceState::VoiceAcquiringMicrophone,
         VoiceState::VoiceConnecting,
         VoiceState::VoiceListening,
         VoiceState::VoiceSpeaking,
@@ -140,7 +139,7 @@ fn no_transition_ever_holds_both_owners() {
         VoiceEvent::RetryRequested,
     ];
     for state in ALL_STATES {
-        for event in events.into_iter().chain(ALL_TIMEOUTS.into_iter()) {
+        for event in events.into_iter().chain(ALL_TIMEOUTS) {
             let next = voice_state_transition(state, event);
             let from = mic_owner(state);
             let to = mic_owner(next);
@@ -159,10 +158,7 @@ fn no_transition_ever_holds_both_owners() {
 #[test]
 fn the_happy_path_reaches_wake_ready() {
     let mut state = VoiceState::Booting;
-    for event in [
-        VoiceEvent::BootCompleted,
-        VoiceEvent::WakeArmed,
-    ] {
+    for event in [VoiceEvent::BootCompleted, VoiceEvent::WakeArmed] {
         state = voice_state_transition(state, event);
     }
     assert_eq!(state, VoiceState::WakeReady);
@@ -186,44 +182,48 @@ fn the_voice_handoff_is_release_then_acquire() {
 
 #[test]
 fn wake_release_requires_sidecar_confirmation() {
-    // 释放先于获取：离开 WakeReleasingMicrophone 的唯一途径是
-    // MicrophoneReleased，计时器或探测不得替代确认。
+    // 释放先于获取：全 (state, event) 笛卡尔积中，只有
+    // (WakeReleasingMicrophone, MicrophoneReleased) 允许进入
+    // VoiceAcquiringMicrophone；计时器或探测不得替代确认。
     for state in ALL_STATES {
         for event in ALL_ERROR_EVENTS.into_iter().chain([
             VoiceEvent::WakeDetected,
+            VoiceEvent::WakeReleaseRequested,
+            VoiceEvent::MicrophoneReleased,
             VoiceEvent::VoiceMicrophoneAcquired,
             VoiceEvent::VoiceConnected,
+            VoiceEvent::VoiceStopped,
+            VoiceEvent::AllTracksEnded,
+            VoiceEvent::ReconnectRequested,
             VoiceEvent::StopRequested,
+            VoiceEvent::WorkspaceSwitchRequested,
         ]) {
-            assert_ne!(
-                voice_state_transition(state, event),
-                VoiceState::VoiceAcquiringMicrophone,
-                "{state:?} + {event:?} must not skip the release confirmation"
+            let next = voice_state_transition(state, event);
+            let is_authorized = state == VoiceState::WakeReleasingMicrophone
+                && event == VoiceEvent::MicrophoneReleased;
+            let reached_from_elsewhere = next == VoiceState::VoiceAcquiringMicrophone
+                && state != VoiceState::VoiceAcquiringMicrophone;
+            assert!(
+                !reached_from_elsewhere || is_authorized,
+                "{state:?} + {event:?} must only reach VoiceAcquiringMicrophone via the release confirmation"
             );
         }
     }
-    assert_eq!(
-        voice_state_transition(VoiceState::WakeReleasingMicrophone, VoiceEvent::MicrophoneReleased),
-        VoiceState::VoiceAcquiringMicrophone
-    );
 }
 
 #[test]
 fn rearm_is_gated_on_all_tracks_ended() {
     // WakeRearming -> WakeReady 只能由 AllTracksEnded 触发。
-    for event in ALL_ERROR_EVENTS
-        .into_iter()
-        .chain([
-            VoiceEvent::BootCompleted,
-            VoiceEvent::WakeArmed,
-            VoiceEvent::WakeDetected,
-            VoiceEvent::MicrophoneReleased,
-            VoiceEvent::VoiceConnected,
-            VoiceEvent::VoiceStopped,
-            VoiceEvent::ReconnectRequested,
-            VoiceEvent::RetryRequested,
-        ])
-    {
+    for event in ALL_ERROR_EVENTS.into_iter().chain([
+        VoiceEvent::BootCompleted,
+        VoiceEvent::WakeArmed,
+        VoiceEvent::WakeDetected,
+        VoiceEvent::MicrophoneReleased,
+        VoiceEvent::VoiceConnected,
+        VoiceEvent::VoiceStopped,
+        VoiceEvent::ReconnectRequested,
+        VoiceEvent::RetryRequested,
+    ]) {
         assert_ne!(
             voice_state_transition(VoiceState::WakeRearming, event),
             VoiceState::WakeReady,
@@ -240,11 +240,23 @@ fn rearm_is_gated_on_all_tracks_ended() {
 fn stop_is_idempotent_from_every_voice_state() {
     for state in VOICE_STATES.into_iter().chain([VoiceState::VoiceStopping]) {
         let stopped = voice_state_transition(state, VoiceEvent::StopRequested);
-        assert_eq!(stopped, VoiceState::VoiceStopping, "{state:?} must enter VoiceStopping");
+        assert_eq!(
+            stopped,
+            VoiceState::VoiceStopping,
+            "{state:?} must enter VoiceStopping"
+        );
         let again = voice_state_transition(stopped, VoiceEvent::StopRequested);
-        assert_eq!(again, VoiceState::VoiceStopping, "repeated StopRequested must be idempotent");
+        assert_eq!(
+            again,
+            VoiceState::VoiceStopping,
+            "repeated StopRequested must be idempotent"
+        );
         let third = voice_state_transition(again, VoiceEvent::StopRequested);
-        assert_eq!(third, VoiceState::VoiceStopping, "StopRequested must never error or revive");
+        assert_eq!(
+            third,
+            VoiceState::VoiceStopping,
+            "StopRequested must never error or revive"
+        );
     }
 }
 
@@ -278,7 +290,10 @@ fn reconnect_is_dropped_while_shutting_down() {
         VoiceState::WakeDetected,
         VoiceState::VoiceAcquiringMicrophone,
     ] {
-        assert!(!is_reconnect_allowed(state), "{state:?} must reject reconnect");
+        assert!(
+            !is_reconnect_allowed(state),
+            "{state:?} must reject reconnect"
+        );
         assert_eq!(
             voice_state_transition(state, VoiceEvent::ReconnectRequested),
             state,
@@ -305,7 +320,12 @@ fn reconnect_is_allowed_only_for_live_voice() {
 
 #[test]
 fn every_timeout_enters_degraded() {
-    for state in ALL_STATES {
+    // Stopping 是终态，晚到的超时不得改变已停止的界面；其余任何状态收到
+    // 超时一律进入 Degraded，绝不作为正常同步手段。
+    for state in ALL_STATES
+        .into_iter()
+        .filter(|state| *state != VoiceState::Stopping)
+    {
         for event in ALL_TIMEOUTS {
             assert_eq!(
                 voice_state_transition(state, event),
@@ -318,7 +338,10 @@ fn every_timeout_enters_degraded() {
 
 #[test]
 fn error_events_enter_degraded() {
-    for state in ALL_STATES {
+    for state in ALL_STATES
+        .into_iter()
+        .filter(|state| *state != VoiceState::Stopping)
+    {
         for event in [VoiceEvent::WakeError, VoiceEvent::RealtimeError] {
             assert_eq!(voice_state_transition(state, event), VoiceState::Degraded);
         }
@@ -328,10 +351,22 @@ fn error_events_enter_degraded() {
 #[test]
 fn degraded_carries_category_recoverability_action_and_owner() {
     for event in ALL_ERROR_EVENTS {
-        let info: DegradedInfo = degraded_info(event, MicOwner::Voice).expect("error events carry DegradedInfo");
-        assert_ne!(info.error_kind, VoiceErrorKind::Unknown, "error category must be specific");
-        assert!(!info.suggested_action.trim().is_empty(), "suggested action must be present");
-        assert_eq!(info.owner, MicOwner::Voice, "current resource owner must be carried");
+        let info: DegradedInfo =
+            degraded_info(event, MicOwner::Voice).expect("error events carry DegradedInfo");
+        assert_ne!(
+            info.error_kind,
+            VoiceErrorKind::Unknown,
+            "error category must be specific"
+        );
+        assert!(
+            !info.suggested_action.trim().is_empty(),
+            "suggested action must be present"
+        );
+        assert_eq!(
+            info.owner,
+            MicOwner::Voice,
+            "current resource owner must be carried"
+        );
         let _ = (info.recoverable, info.error_kind);
     }
 }
@@ -426,7 +461,10 @@ fn stopping_is_terminal() {
 
 #[test]
 fn degraded_recovers_only_through_retry() {
-    for state in ALL_STATES {
+    for state in ALL_STATES
+        .into_iter()
+        .filter(|state| *state != VoiceState::Stopping)
+    {
         for event in ALL_ERROR_EVENTS {
             let degraded = voice_state_transition(state, event);
             assert_eq!(degraded, VoiceState::Degraded);
@@ -486,9 +524,12 @@ fn timeout_and_retry_cycle_reaches_wake_ready_again() {
     let mut state = VoiceState::WakeReady;
     state = voice_state_transition(state, VoiceEvent::WakeDetected);
     state = voice_state_transition(state, VoiceEvent::WakeReleaseRequested);
-    state = voice_state_transition(state, VoiceEvent::Timeout {
-        stage: TimeoutStage::MicrophoneRelease,
-    });
+    state = voice_state_transition(
+        state,
+        VoiceEvent::Timeout {
+            stage: TimeoutStage::MicrophoneRelease,
+        },
+    );
     assert_eq!(state, VoiceState::Degraded);
     state = voice_state_transition(state, VoiceEvent::RetryRequested);
     assert_eq!(state, VoiceState::Booting);
@@ -502,11 +543,17 @@ fn timeout_and_retry_cycle_reaches_wake_ready_again() {
 fn trigger_names_are_stable() {
     assert_eq!(VoiceEvent::BootCompleted.trigger(), "bootCompleted");
     assert_eq!(VoiceEvent::WakeDetected.trigger(), "wakeDetected");
-    assert_eq!(VoiceEvent::MicrophoneReleased.trigger(), "microphoneReleased");
+    assert_eq!(
+        VoiceEvent::MicrophoneReleased.trigger(),
+        "microphoneReleased"
+    );
     assert_eq!(VoiceEvent::VoiceStopped.trigger(), "voiceStopped");
     assert_eq!(VoiceEvent::AllTracksEnded.trigger(), "allTracksEnded");
     assert_eq!(
-        VoiceEvent::Timeout { stage: TimeoutStage::MicrophoneRelease }.trigger(),
+        VoiceEvent::Timeout {
+            stage: TimeoutStage::MicrophoneRelease
+        }
+        .trigger(),
         "timeout.microphoneRelease"
     );
 }
@@ -515,18 +562,38 @@ fn trigger_names_are_stable() {
 fn frontend_events_round_trip_through_from_trigger() {
     for (name, expected) in [
         ("wakeDetected", VoiceEvent::WakeDetected),
-        ("voiceMicrophoneAcquired", VoiceEvent::VoiceMicrophoneAcquired),
+        (
+            "voiceMicrophoneAcquired",
+            VoiceEvent::VoiceMicrophoneAcquired,
+        ),
         ("allTracksEnded", VoiceEvent::AllTracksEnded),
         ("speakingStarted", VoiceEvent::SpeakingStarted),
         ("speakingEnded", VoiceEvent::SpeakingEnded),
         ("reconnectRequested", VoiceEvent::ReconnectRequested),
         ("retryRequested", VoiceEvent::RetryRequested),
         ("stopRequested", VoiceEvent::StopRequested),
-        ("workspaceSwitchRequested", VoiceEvent::WorkspaceSwitchRequested),
-        ("microphoneAcquireTimeout", VoiceEvent::Timeout { stage: TimeoutStage::MicrophoneAcquire }),
-        ("voiceConnectTimeout", VoiceEvent::Timeout { stage: TimeoutStage::VoiceConnect }),
+        (
+            "workspaceSwitchRequested",
+            VoiceEvent::WorkspaceSwitchRequested,
+        ),
+        (
+            "microphoneAcquireTimeout",
+            VoiceEvent::Timeout {
+                stage: TimeoutStage::MicrophoneAcquire,
+            },
+        ),
+        (
+            "voiceConnectTimeout",
+            VoiceEvent::Timeout {
+                stage: TimeoutStage::VoiceConnect,
+            },
+        ),
     ] {
-        assert_eq!(VoiceEvent::from_trigger(name), Some(expected), "{name} must parse");
+        assert_eq!(
+            VoiceEvent::from_trigger(name),
+            Some(expected),
+            "{name} must parse"
+        );
     }
     assert_eq!(VoiceEvent::from_trigger("nonsense"), None);
 }

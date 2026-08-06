@@ -2334,6 +2334,30 @@ fn start_wake_supervisor(app: AppHandle) {
     if state.wake_supervisor_running.swap(true, Ordering::SeqCst) {
         return;
     }
+    // Never arm the wake sidecar while a voice session owns (or is about to
+    // own) the microphone: the sidecar would grab the device mid-voice and
+    // create two simultaneous holders. Re-arm happens from WakeArming /
+    // WakeReady or an explicit user action after the session ended.
+    let voice_active = state
+        .voice_status
+        .try_read()
+        .map(|voice| {
+            matches!(
+                voice.state,
+                VoiceState::VoiceAcquiringMicrophone
+                    | VoiceState::VoiceConnecting
+                    | VoiceState::VoiceListening
+                    | VoiceState::VoiceSpeaking
+                    | VoiceState::Working
+                    | VoiceState::VoiceStopping
+                    | VoiceState::WakeRearming
+            )
+        })
+        .unwrap_or(true);
+    if voice_active {
+        state.wake_supervisor_running.store(false, Ordering::SeqCst);
+        return;
+    }
     state.wake_enabled.store(true, Ordering::SeqCst);
     state.wake_release_requested.store(false, Ordering::SeqCst);
 

@@ -835,12 +835,28 @@ async function acquireVoiceMicrophone() {
     });
     watchTrackEnded(microphoneStream);
     attachAnalyser(microphoneStream, "microphone");
+  } catch (error) {
+    // Mic acquisition failed: report the acquire stage and release any stream.
+    cleanupPeer();
+    stopLocalTracks();
+    const detail = String(error);
+    try { await reportVoiceEvent("microphoneAcquireTimeout"); } catch { /* already degraded */ }
+    banner.hidden = false;
+    $("#degraded-copy").textContent = detail;
+    response.textContent = detail;
+    return;
+  }
+  try {
     await reportVoiceEvent("voiceMicrophoneAcquired");
     await connectVoiceSession();
   } catch (error) {
+    // The microphone was handed over; failure here is a voice-session or
+    // runtime problem (for example Codex not logged in), not a mic-acquire
+    // timeout. Stop local tracks so the mic is not left held after Degraded.
     cleanupPeer();
+    stopLocalTracks();
     const detail = String(error);
-    try { await reportVoiceEvent("microphoneAcquireTimeout"); } catch { /* already degraded */ }
+    try { await reportVoiceEvent("voiceConnectTimeout"); } catch { /* already degraded */ }
     banner.hidden = false;
     $("#degraded-copy").textContent = detail;
     response.textContent = detail;
@@ -1010,6 +1026,20 @@ if (currentWindow) {
       void invoke<DirectVoice>("direct_voice_status").then(updateVoiceInfo);
       return;
     }
+    const voiceActive = state.voice != null && (
+      state.voice.micOwner === "voice" ||
+      state.voice.state === "voiceAcquiringMicrophone" ||
+      state.voice.state === "voiceConnecting" ||
+      state.voice.state === "voiceListening" ||
+      state.voice.state === "voiceSpeaking" ||
+      state.voice.state === "working" ||
+      state.voice.state === "voiceStopping" ||
+      state.voice.state === "wakeRearming"
+    );
+    // While a voice session is in progress, the voice state machine owns the
+    // microphone and the error surface. Do not tear down the peer, degrade the
+    // UI, or re-arm the wake sidecar here: that would grab the mic mid-voice.
+    if (voiceActive) return;
     cleanupPeer();
     state.directVoice = null;
     state.agentWorking = false;

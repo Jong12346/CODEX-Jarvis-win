@@ -21,12 +21,17 @@ use tokio::{
     time::{timeout, Duration},
 };
 
+mod diagnostics;
 mod process;
 mod runtime_state;
 mod stop_sequence;
 mod voice_state;
 mod workspace;
 
+#[doc(hidden)]
+pub use diagnostics::{
+    classify, redact, rotate_plan, LogFileInfo, ProbeResult, RotatePlan, Verdict, VerdictLevel,
+};
 use process::SystemProcessSpawner;
 #[doc(hidden)]
 pub use process::{ProcessControl, ProcessSpawner, ProcessSpec, SpawnedCodexProcess};

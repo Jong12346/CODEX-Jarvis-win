@@ -1,4 +1,4 @@
-﻿//! Phase 4 contract: diagnostics classification, redaction and log rotation.
+//! Phase 4 contract: diagnostics classification, redaction and log rotation.
 //!
 //! Activation note (same as phases 1-3): this file lives here until the
 //! symbols exist, then the implementation commit moves it into
@@ -15,9 +15,7 @@
 //! - rotate_plan() keeps the newest logs within max_bytes and deletes oldest
 //!   first; the newest file is never deleted.
 
-use jarvis_codex_lib::{
-    classify, redact, rotate_plan, LogFileInfo, ProbeResult, RotatePlan, Verdict, VerdictLevel,
-};
+use jarvis_codex_lib::{classify, redact, rotate_plan, LogFileInfo, ProbeResult, VerdictLevel};
 
 #[test]
 fn ok_is_green_with_a_stable_code() {
@@ -51,10 +49,18 @@ fn every_fault_maps_to_a_distinct_stable_code() {
         "webview2_missing",
         "workspace_unreadable",
     ];
-    let mut codes: Vec<&str> = results.iter().map(|result| classify(*result).code).collect();
+    let mut codes: Vec<&str> = results
+        .iter()
+        .map(|result| classify(*result).code)
+        .collect();
+    let mut expected_sorted: Vec<&str> = expected.to_vec();
     codes.sort_unstable();
     codes.dedup();
-    assert_eq!(codes, expected, "the fault code set must be stable and distinct");
+    expected_sorted.sort_unstable();
+    assert_eq!(
+        codes, expected_sorted,
+        "the fault code set must be stable and distinct"
+    );
 }
 
 #[test]
@@ -65,7 +71,11 @@ fn fault_levels_are_appropriate() {
         ProbeResult::WebView2Missing,
         ProbeResult::WorkspaceUnreadable,
     ] {
-        assert_eq!(classify(result).level, VerdictLevel::Red, "{result:?} must be Red");
+        assert_eq!(
+            classify(result).level,
+            VerdictLevel::Red,
+            "{result:?} must be Red"
+        );
     }
     for result in [
         ProbeResult::ProxyUnreachable,
@@ -74,7 +84,11 @@ fn fault_levels_are_appropriate() {
         ProbeResult::MicDenied,
         ProbeResult::SpeechPackMissing,
     ] {
-        assert_eq!(classify(result).level, VerdictLevel::Yellow, "{result:?} must be Yellow");
+        assert_eq!(
+            classify(result).level,
+            VerdictLevel::Yellow,
+            "{result:?} must be Yellow"
+        );
     }
 }
 
@@ -93,7 +107,10 @@ fn every_verdict_has_chinese_message_and_action() {
         ProbeResult::WorkspaceUnreadable,
     ] {
         let verdict = classify(result);
-        assert!(!verdict.message_zh.trim().is_empty(), "{result:?}.message_zh");
+        assert!(
+            !verdict.message_zh.trim().is_empty(),
+            "{result:?}.message_zh"
+        );
         assert!(
             !verdict.suggested_action_zh.trim().is_empty(),
             "{result:?}.suggested_action_zh"
@@ -121,16 +138,30 @@ fn voice_faults_suggest_text_degrade() {
 fn redact_removes_bearer_tokens() {
     let sample = "Authorization: Bearer abcDEF123XYZ";
     let out = redact(sample);
-    assert!(!out.contains("abcDEF123XYZ"), "bearer token must be removed");
-    assert!(out.contains("Authorization: Bearer <redacted>"), "structure must stay");
+    assert!(
+        !out.contains("abcDEF123XYZ"),
+        "bearer token must be removed"
+    );
+    assert!(
+        out.contains("Authorization: Bearer <redacted>"),
+        "structure must stay"
+    );
 }
 
 #[test]
 fn redact_removes_openai_keys() {
-    let sample = "OPENAI_API_KEY=sk-proj-abc123XYZ";
-    let out = redact(sample);
-    assert!(!out.contains("sk-proj-abc123XYZ"));
-    assert!(out.contains("sk-<redacted>"));
+    let bare = redact("sk-proj-abc123XYZ");
+    assert!(!bare.contains("sk-proj-abc123XYZ"));
+    assert!(
+        bare.contains("sk-<redacted>"),
+        "a bare key keeps the sk- prefix"
+    );
+    let env = redact("OPENAI_API_KEY=sk-proj-abc123XYZ");
+    assert!(!env.contains("sk-proj-abc123XYZ"));
+    assert!(
+        env.contains("<redacted>"),
+        "an env assignment fully redacts the value"
+    );
 }
 
 #[test]
@@ -158,7 +189,10 @@ fn redact_removes_sensitive_env_values() {
 fn redact_windows_user_segment() {
     let sample = r"C:\Users\DELL\Workspace\project";
     let out = redact(sample);
-    assert!(!out.contains("DELL"), "the username segment must be removed");
+    assert!(
+        !out.contains("DELL"),
+        "the username segment must be removed"
+    );
     assert!(out.contains(r"C:\Users\<user>\Workspace\project"));
 }
 
@@ -178,7 +212,8 @@ fn redact_preserves_plain_diagnostic_text() {
 
 #[test]
 fn redact_is_idempotent() {
-    let sample = "Authorization: Bearer abc; C:\\Users\\DELL\\x; HTTP_PROXY=http://u:p@h:1; TOKEN=secret";
+    let sample =
+        "Authorization: Bearer abc; C:\\Users\\DELL\\x; HTTP_PROXY=http://u:p@h:1; TOKEN=secret";
     let once = redact(sample);
     let twice = redact(&once);
     assert_eq!(once, twice);
@@ -187,9 +222,21 @@ fn redact_is_idempotent() {
 #[test]
 fn rotate_plan_keeps_files_within_cap() {
     let files = vec![
-        LogFileInfo { name: "a".into(), size_bytes: 10, modified_ms: 1 },
-        LogFileInfo { name: "b".into(), size_bytes: 20, modified_ms: 2 },
-        LogFileInfo { name: "c".into(), size_bytes: 30, modified_ms: 3 },
+        LogFileInfo {
+            name: "a".into(),
+            size_bytes: 10,
+            modified_ms: 1,
+        },
+        LogFileInfo {
+            name: "b".into(),
+            size_bytes: 20,
+            modified_ms: 2,
+        },
+        LogFileInfo {
+            name: "c".into(),
+            size_bytes: 30,
+            modified_ms: 3,
+        },
     ];
     let plan = rotate_plan(files, 60);
     assert_eq!(plan.delete, Vec::<String>::new());
@@ -199,9 +246,21 @@ fn rotate_plan_keeps_files_within_cap() {
 #[test]
 fn rotate_plan_deletes_oldest_first() {
     let files = vec![
-        LogFileInfo { name: "a".into(), size_bytes: 10, modified_ms: 1 },
-        LogFileInfo { name: "b".into(), size_bytes: 10, modified_ms: 2 },
-        LogFileInfo { name: "c".into(), size_bytes: 10, modified_ms: 3 },
+        LogFileInfo {
+            name: "a".into(),
+            size_bytes: 10,
+            modified_ms: 1,
+        },
+        LogFileInfo {
+            name: "b".into(),
+            size_bytes: 10,
+            modified_ms: 2,
+        },
+        LogFileInfo {
+            name: "c".into(),
+            size_bytes: 10,
+            modified_ms: 3,
+        },
     ];
     let plan = rotate_plan(files, 20);
     assert_eq!(plan.keep, vec!["c".to_string(), "b".to_string()]);
@@ -211,8 +270,16 @@ fn rotate_plan_deletes_oldest_first() {
 #[test]
 fn rotate_plan_never_deletes_the_newest() {
     let files = vec![
-        LogFileInfo { name: "a".into(), size_bytes: 10, modified_ms: 1 },
-        LogFileInfo { name: "b".into(), size_bytes: 10, modified_ms: 2 },
+        LogFileInfo {
+            name: "a".into(),
+            size_bytes: 10,
+            modified_ms: 1,
+        },
+        LogFileInfo {
+            name: "b".into(),
+            size_bytes: 10,
+            modified_ms: 2,
+        },
     ];
     let plan = rotate_plan(files, 0);
     assert_eq!(plan.keep, vec!["b".to_string()]);
@@ -222,8 +289,16 @@ fn rotate_plan_never_deletes_the_newest() {
 #[test]
 fn rotate_plan_keeps_newest_when_it_alone_exceeds_cap() {
     let files = vec![
-        LogFileInfo { name: "a".into(), size_bytes: 10, modified_ms: 1 },
-        LogFileInfo { name: "b".into(), size_bytes: 100, modified_ms: 2 },
+        LogFileInfo {
+            name: "a".into(),
+            size_bytes: 10,
+            modified_ms: 1,
+        },
+        LogFileInfo {
+            name: "b".into(),
+            size_bytes: 100,
+            modified_ms: 2,
+        },
     ];
     let plan = rotate_plan(files, 50);
     assert_eq!(plan.keep, vec!["b".to_string()]);
@@ -240,8 +315,16 @@ fn rotate_plan_empty_input() {
 #[test]
 fn rotate_plan_sorts_by_modification_time() {
     let files = vec![
-        LogFileInfo { name: "late".into(), size_bytes: 5, modified_ms: 200 },
-        LogFileInfo { name: "early".into(), size_bytes: 5, modified_ms: 100 },
+        LogFileInfo {
+            name: "late".into(),
+            size_bytes: 5,
+            modified_ms: 200,
+        },
+        LogFileInfo {
+            name: "early".into(),
+            size_bytes: 5,
+            modified_ms: 100,
+        },
     ];
     let plan = rotate_plan(files, 5);
     assert_eq!(plan.keep, vec!["late".to_string()]);
@@ -273,5 +356,7 @@ fn verdict_serializes_with_zh_fields() {
     assert_eq!(value["level"], json!("yellow"));
     assert_eq!(value["code"], json!("mic_denied"));
     assert!(value["messageZh"].as_str().is_some_and(|s| !s.is_empty()));
-    assert!(value["suggestedActionZh"].as_str().is_some_and(|s| !s.is_empty()));
+    assert!(value["suggestedActionZh"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty()));
 }

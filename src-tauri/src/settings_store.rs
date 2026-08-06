@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 #[doc(hidden)]
-pub const SETTINGS_SCHEMA_VERSION: u32 = 1;
+pub const SETTINGS_SCHEMA_VERSION: u32 = 2;
 
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -26,6 +26,8 @@ pub struct Settings {
     pub codex_binary: Option<String>,
     pub microphone: Option<String>,
     pub autostart: bool,
+    pub hotkey: Option<String>,
+    pub wizard_completed: bool,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -41,6 +43,8 @@ impl Default for Settings {
             codex_binary: None,
             microphone: None,
             autostart: true,
+            hotkey: None,
+            wizard_completed: false,
             extra: Map::new(),
         }
     }
@@ -111,6 +115,16 @@ pub fn migrate(raw_json: &str, from_version: u32) -> Result<Settings, SettingsEr
     if let Some(value) = obj.remove("autostart") {
         if let Some(autostart) = value.as_bool() {
             settings.autostart = autostart;
+        }
+    }
+    if let Some(value) = obj.remove("hotkey") {
+        if let Some(hotkey) = value.as_str() {
+            settings.hotkey = Some(hotkey.to_owned());
+        }
+    }
+    if let Some(value) = obj.remove("wizardCompleted") {
+        if let Some(completed) = value.as_bool() {
+            settings.wizard_completed = completed;
         }
     }
     settings.extra = obj;

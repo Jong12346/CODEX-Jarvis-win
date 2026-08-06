@@ -58,6 +58,13 @@ type SettingsDto = {
   speechStyle: string;
   codexBinary?: string;
   autostart: boolean;
+  hotkey?: string;
+  wizardCompleted: boolean;
+};
+type WizardReport = {
+  completed: boolean;
+  canProceed: boolean;
+  steps: { id: string; level: "green" | "yellow" | "red"; blocking: boolean }[];
 };
 type WakeStatus = {
   enabled: boolean;
@@ -228,7 +235,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   </footer>
   <div id="degraded-banner" class="degraded-banner" hidden><b>JARVIS NEEDS PERMISSION</b><span id="degraded-copy">首次使用请允许麦克风和语音识别。</span></div>
   <dialog id="approval"><h2>高风险操作确认</h2><p id="approval-copy">Codex 请求执行需要确认的动作。</p><div><button id="deny">拒绝</button><button id="approve">允许一次</button></div></dialog>
-  <dialog id="settings-dialog"><h2>JARVIS SYSTEM</h2><dl><dt>Wake phrase</dt><dd>嗨 Jarvis / Hey Jarvis</dd><dt>Wake listener</dt><dd id="wake-auth">检测中</dd><dt>Codex thread</dt><dd id="thread-id">—</dd><dt>Workspace</dt><dd id="workspace">—</dd><dt>Permission</dt><dd id="permission-mode-label">—</dd><dt>Voice style</dt><dd id="speech-style-label">—</dd><dt>Voice kernel</dt><dd id="voice-auth">检测中</dd></dl><label class="workspace-setting">工作目录<input id="workspace-setting" autocomplete="off" spellcheck="false"></label><label class="workspace-setting">Codex 可执行文件（可选）<input id="codex-binary-setting" autocomplete="off" spellcheck="false" placeholder="自动查找，或填写 codex.exe 的完整路径"></label><fieldset class="permission-setting"><legend>Codex 操作权限</legend><label><input type="radio" name="permission-mode" value="safe"><span><b>安全模式</b><small>工作区外或高风险操作时询问</small></span></label><label><input type="radio" name="permission-mode" value="auto"><span><b>自动办公</b><small>仅在所选绝对工作区内自主执行，越界操作直接阻止</small></span></label><label class="danger"><input type="radio" name="permission-mode" value="full"><span><b>完全访问</b><small>不限制目录且不询问，请谨慎使用</small></span></label></fieldset><fieldset class="permission-setting speech-style-setting"><legend>语音风格</legend><label><input type="radio" name="speech-style" value="mandarin"><span><b>普通话</b><small>清晰、中性，默认风格</small></span></label><label><input type="radio" name="speech-style" value="shaanxi"><span><b>陕西话</b><small>使用自然的陕西方言措辞和口音，实际效果可能有差异</small></span></label></fieldset><p>权限、工作目录、Codex 路径或语音风格切换会停止当前任务并重建运行时。</p><p>正在通话时切换语音风格，保存后会自动重连 Voice；语音风格只影响表达方式，不改变任务权限。</p><p>工作目录保存后立即生效；每个目录会续接自己的 Codex thread。</p><p>“新开线程”会结束当前任务并创建一个全新的 Codex thread；原线程仍保留在 Codex 历史记录中。</p><p>唤醒词在本机识别；Jarvis 页面通过 Codex app-server V3 WebRTC 进入官方 Voice 线程。认证复用本机 Codex 登录，不读取凭据、不模拟点击，也不建立第二套 GPT-Live。</p><div class="diagnostics-section" style="margin-top:10px;border-top:1px solid rgba(148,163,184,.25);padding-top:10px"><b style="color:#e2e8f0">一键诊断</b><div style="margin-top:6px"><button id="run-diagnostics" type="button" style="margin-right:8px">一键检查</button><button id="copy-diagnostics" type="button">复制诊断</button></div><div id="diagnostics-result" style="margin-top:6px;font-size:12px;color:#cbd5e1;white-space:pre-wrap"></div></div><div class="settings-actions"><button id="new-thread" class="new-thread">＋ 新开线程</button><span></span><button id="save-settings">保存</button><button id="close-settings">关闭</button></div></dialog>
+  <dialog id="settings-dialog"><h2>JARVIS SYSTEM</h2><dl><dt>Wake phrase</dt><dd>嗨 Jarvis / Hey Jarvis</dd><dt>Wake listener</dt><dd id="wake-auth">检测中</dd><dt>Codex thread</dt><dd id="thread-id">—</dd><dt>Workspace</dt><dd id="workspace">—</dd><dt>Permission</dt><dd id="permission-mode-label">—</dd><dt>Voice style</dt><dd id="speech-style-label">—</dd><dt>Voice kernel</dt><dd id="voice-auth">检测中</dd></dl><label class="workspace-setting">工作目录<input id="workspace-setting" autocomplete="off" spellcheck="false"></label><label class="workspace-setting">全局快捷键（如 Alt+Shift+J，留空禁用）<input id="hotkey-setting" autocomplete="off" spellcheck="false" placeholder="Alt+Shift+J"></label><label class="workspace-setting">Codex 可执行文件（可选）<input id="codex-binary-setting" autocomplete="off" spellcheck="false" placeholder="自动查找，或填写 codex.exe 的完整路径"></label><fieldset class="permission-setting"><legend>Codex 操作权限</legend><label><input type="radio" name="permission-mode" value="safe"><span><b>安全模式</b><small>工作区外或高风险操作时询问</small></span></label><label><input type="radio" name="permission-mode" value="auto"><span><b>自动办公</b><small>仅在所选绝对工作区内自主执行，越界操作直接阻止</small></span></label><label class="danger"><input type="radio" name="permission-mode" value="full"><span><b>完全访问</b><small>不限制目录且不询问，请谨慎使用</small></span></label></fieldset><fieldset class="permission-setting speech-style-setting"><legend>语音风格</legend><label><input type="radio" name="speech-style" value="mandarin"><span><b>普通话</b><small>清晰、中性，默认风格</small></span></label><label><input type="radio" name="speech-style" value="shaanxi"><span><b>陕西话</b><small>使用自然的陕西方言措辞和口音，实际效果可能有差异</small></span></label></fieldset><p>权限、工作目录、Codex 路径或语音风格切换会停止当前任务并重建运行时。</p><p>正在通话时切换语音风格，保存后会自动重连 Voice；语音风格只影响表达方式，不改变任务权限。</p><p>工作目录保存后立即生效；每个目录会续接自己的 Codex thread。</p><p>“新开线程”会结束当前任务并创建一个全新的 Codex thread；原线程仍保留在 Codex 历史记录中。</p><p>唤醒词在本机识别；Jarvis 页面通过 Codex app-server V3 WebRTC 进入官方 Voice 线程。认证复用本机 Codex 登录，不读取凭据、不模拟点击，也不建立第二套 GPT-Live。</p><div class="diagnostics-section" style="margin-top:10px;border-top:1px solid rgba(148,163,184,.25);padding-top:10px"><b style="color:#e2e8f0">一键诊断</b><div style="margin-top:6px"><button id="run-diagnostics" type="button" style="margin-right:8px">一键检查</button><button id="copy-diagnostics" type="button">复制诊断</button></div><div id="diagnostics-result" style="margin-top:6px;font-size:12px;color:#cbd5e1;white-space:pre-wrap"></div></div><dialog id="wizard-dialog"><h2>首次启动检查</h2><div id="wizard-steps" style="margin:8px 0;font-size:12px"></div><div class="settings-actions"><button id="wizard-continue">继续</button></div></dialog><div class="settings-actions"><button id="new-thread" class="new-thread">＋ 新开线程</button><span></span><button id="save-settings">保存</button><button id="close-settings">关闭</button></div></dialog>
 </main>`;
 
 const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
@@ -239,6 +246,7 @@ const banner = $("#degraded-banner") as HTMLDivElement;
 const mic = $("#mic") as HTMLButtonElement;
 const approval = $("#approval") as HTMLDialogElement;
 const settings = $("#settings-dialog") as HTMLDialogElement;
+const wizard = $("#wizard-dialog") as HTMLDialogElement;
 const characterRig = $<HTMLElement>(".character-rig");
 const hoverControls = $<HTMLElement>(".controls");
 const settingsButton = $<HTMLButtonElement>("#settings");
@@ -917,6 +925,45 @@ function stopLocalTracks() {
   }
 }
 
+const wizardLabels: Record<string, string> = {
+  windows: "系统版本",
+  webview2: "WebView2 Runtime",
+  microphone: "麦克风权限",
+  speech_pack: "语音识别语言包",
+  codex: "Codex 可执行文件",
+  workspace: "工作目录",
+  network: "网络连接",
+};
+async function showWizardIfNeeded() {
+  try {
+    const report = await invoke<WizardReport>("wizard_status");
+    if (report.completed) return;
+    const container = $("#wizard-steps");
+    container.innerHTML = report.steps.map((step) => {
+      const color = step.level === "green" ? "#22c55e" : step.level === "yellow" ? "#f59e0b" : "#ef4444";
+      return '<div style="margin:2px 0;color:#dbeafe"><span style="color:' + color + '">●</span> ' + (wizardLabels[step.id] ?? step.id) + (step.blocking ? '（阻塞）' : '') + '</div>';
+    }).join("");
+    ($("#wizard-continue") as HTMLButtonElement).disabled = !report.canProceed;
+    wizard.showModal();
+  } catch { /* 向导失败不阻塞启动 */ }
+}
+$("#wizard-continue").addEventListener("click", async () => {
+  try {
+    await invoke<SettingsDto>("save_settings", {
+      request: {
+        workspace: workspace.id,
+        threadId: savedThreadId() ?? undefined,
+        permissionMode,
+        speechStyle,
+        codexPath: codexBinary || null,
+        wizardCompleted: true,
+      },
+    });
+    wizard.close();
+  } catch (error) {
+    $("#wizard-steps").textContent = `保存失败：${String(error)}`;
+  }
+});
 async function loadBackendSettings(): Promise<SettingsDto | null> {
   try {
     let settings = await invoke<SettingsDto>("get_settings");
@@ -946,6 +993,16 @@ if (currentWindow) {
   await listen<Message>("codex-event", ({ payload }) => void handle(payload));
   await listen<VoiceStateInfo>("jarvis-voice-state", ({ payload }) => applyVoiceState(payload));
   await listen("jarvis-voice-may-acquire-microphone", () => { /* 状态机已切到 voiceAcquiringMicrophone，由 applyVoiceState 驱动 */ });
+  await listen<{ id: string }>("jarvis-tray-action", ({ payload }) => {
+    if (payload.id === "textMode") ($("#command-input") as HTMLInputElement).focus();
+    if (payload.id === "diagnostics") {
+      settings.showModal();
+      void ($("#run-diagnostics") as HTMLButtonElement).click();
+    }
+  });
+  await listen<{ error: string }>("jarvis-hotkey-error", ({ payload }) => {
+    response.textContent = `快捷键：${payload.error}`;
+  });
   await listen<RuntimeStateInfo>("jarvis-runtime-state", ({ payload }) => {
     if (payload.state === "ready") {
       banner.hidden = true;
@@ -1068,6 +1125,7 @@ function syncSpeechStyleControls() {
 
 $("#settings").addEventListener("click", () => {
   ($("#codex-binary-setting") as HTMLInputElement).value = codexBinary;
+  ($("#hotkey-setting") as HTMLInputElement).value = state.settings?.hotkey ?? "";
   syncPermissionControls();
   syncSpeechStyleControls();
   settings.showModal();
@@ -1217,6 +1275,7 @@ $("#save-settings").addEventListener("click", async () => {
           permissionMode: nextPermission,
           speechStyle: nextSpeechStyle,
           codexPath: nextCodexBinary || null,
+          hotkey: ($("#hotkey-setting") as HTMLInputElement).value.trim() || null,
         },
       });
     } catch { /* localStorage 仍作缓存 */ }
@@ -1296,6 +1355,7 @@ if (currentWindow) {
     await armWakeListener();
     updateVoiceInfo(await invoke<DirectVoice>("direct_voice_status"));
     applyVoiceState(await invoke<VoiceStateInfo>("voice_state"));
+    await showWizardIfNeeded();
     if (await invoke<boolean>("consume_cold_wake")) {
       transcript.textContent = "“嗨，Jarvis”";
     }

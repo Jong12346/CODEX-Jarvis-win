@@ -86,6 +86,8 @@ struct AppState {
     voice_status: RwLock<VoiceStateInfo>,
     stop_step: RwLock<StopStep>,
     stop_sequence_running: AtomicBool,
+    tray: StdMutex<Option<tauri::tray::TrayIcon>>,
+    hotkey_thread_id: StdMutex<Option<u32>>,
 }
 
 #[tauri::command]
@@ -576,6 +578,7 @@ async fn transition_voice_state(app: &AppHandle, event: VoiceEvent) -> VoiceStat
         },
     );
     let _ = app.emit("jarvis-voice-state", info.clone());
+    update_tray_menu(app);
     if info.state == VoiceState::VoiceAcquiringMicrophone {
         let _ = app.emit(
             "jarvis-voice-may-acquire-microphone",
@@ -876,6 +879,7 @@ async fn transition_runtime_state(
         },
     );
     let _ = app.emit("jarvis-runtime-state", info.clone());
+    update_tray_menu(app);
     info
 }
 
@@ -1653,36 +1657,14 @@ async fn probe_network() -> ProbeResult {
 }
 
 async fn collect_diagnostics(app: &AppHandle, state: &AppState) -> Vec<DiagnosticItem> {
-    vec![
-        DiagnosticItem {
-            key: "windows",
-            verdict: classify(ProbeResult::Ok),
-        },
-        DiagnosticItem {
-            key: "webview2",
-            verdict: classify(probe_webview2()),
-        },
-        DiagnosticItem {
-            key: "microphone",
-            verdict: classify(probe_microphone()),
-        },
-        DiagnosticItem {
-            key: "speech_pack",
-            verdict: classify(probe_speech_pack(app).await),
-        },
-        DiagnosticItem {
-            key: "codex",
-            verdict: classify(probe_codex(app, state).await),
-        },
-        DiagnosticItem {
-            key: "workspace",
-            verdict: classify(probe_workspace(state).await),
-        },
-        DiagnosticItem {
-            key: "network",
-            verdict: classify(probe_network().await),
-        },
-    ]
+    collect_probe_results(app, state)
+        .await
+        .into_iter()
+        .map(|(key, result)| DiagnosticItem {
+            key,
+            verdict: classify(result),
+        })
+        .collect()
 }
 
 fn apply_log_rotation(app: &AppHandle) {
@@ -1779,6 +1761,306 @@ async fn copy_diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<
     Ok(redact(&lines.join("\n")))
 }
 
+async fn collect_probe_results(
+    app: &AppHandle,
+    state: &AppState,
+) -> Vec<(&'static str, ProbeResult)> {
+    vec![
+        ("windows", ProbeResult::Ok),
+        ("webview2", probe_webview2()),
+        ("microphone", probe_microphone()),
+        ("speech_pack", probe_speech_pack(app).await),
+        ("codex", probe_codex(app, state).await),
+        ("workspace", probe_workspace(state).await),
+        ("network", probe_network().await),
+    ]
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WizardStepDto {
+    id: &'static str,
+    level: VerdictLevel,
+    blocking: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WizardReport {
+    completed: bool,
+    can_proceed: bool,
+    steps: Vec<WizardStepDto>,
+}
+
+#[tauri::command]
+async fn wizard_status(app: AppHandle, state: State<'_, AppState>) -> Result<WizardReport, String> {
+    let settings = load_settings(&app);
+    let steps = crate::app_shell::wizard_steps(&collect_probe_results(&app, &state).await);
+    Ok(WizardReport {
+        completed: settings.wizard_completed,
+        can_proceed: crate::app_shell::can_proceed(&steps),
+        steps: steps
+            .into_iter()
+            .map(|step| WizardStepDto {
+                id: step.id,
+                level: step.status,
+                blocking: step.blocking,
+            })
+            .collect(),
+    })
+}
+
+fn build_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem};
+    let state = app.state::<AppState>();
+    let runtime_state = state
+        .runtime_status
+        .try_read()
+        .map(|status| status.state)
+        .unwrap_or(RuntimeState::Absent);
+    let voice_state = state
+        .voice_status
+        .try_read()
+        .map(|status| status.state)
+        .unwrap_or(VoiceState::Booting);
+    let specs = crate::app_shell::tray_menu(runtime_state, voice_state);
+    let mut menu_items = Vec::new();
+    for spec in &specs {
+        let text = match spec.id {
+            "show" => "显示 Jarvis",
+            "hide" => "隐藏",
+            "wake" => "唤醒",
+            "textMode" => "文字模式",
+            "stop" => "STOP",
+            "diagnostics" => "一键诊断",
+            "exit" => "退出",
+            _ => spec.id,
+        };
+        menu_items.push(MenuItem::with_id(
+            app,
+            spec.id,
+            text,
+            spec.enabled,
+            None::<&str>,
+        )?);
+    }
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = menu_items
+        .iter()
+        .map(|item| item as &dyn tauri::menu::IsMenuItem<tauri::Wry>)
+        .collect();
+    Menu::with_items(app, &refs)
+}
+
+fn update_tray_menu(app: &AppHandle) {
+    let Ok(menu) = build_tray_menu(app) else {
+        return;
+    };
+    let state = app.state::<AppState>();
+    let guard = state.tray.lock().unwrap();
+    if let Some(tray) = guard.as_ref() {
+        let _ = tray.set_menu(Some(menu));
+    }
+}
+
+fn handle_tray_menu_event(app: &AppHandle, id: &str) {
+    match id {
+        "show" => raise_jarvis_window(app),
+        "hide" => {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
+            }
+        }
+        "wake" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                handle_voice_event(app.clone(), crate::app_shell::wake_entry()).await;
+                raise_jarvis_window(&app);
+            });
+        }
+        "textMode" => {
+            raise_jarvis_window(app);
+            let _ = app.emit("jarvis-tray-action", json!({"id": "textMode"}));
+        }
+        "stop" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                handle_voice_event(app, VoiceEvent::StopRequested).await;
+            });
+        }
+        "diagnostics" => {
+            raise_jarvis_window(app);
+            let _ = app.emit("jarvis-tray-action", json!({"id": "diagnostics"}));
+        }
+        "exit" => app.exit(0),
+        _ => {}
+    }
+}
+
+fn build_tray(app: &AppHandle) {
+    let Ok(menu) = build_tray_menu(app) else {
+        return;
+    };
+    let tray = tauri::tray::TrayIconBuilder::with_id("jarvis-main")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| handle_tray_menu_event(app, event.id.as_ref()))
+        .build(app);
+    if let Ok(tray) = tray {
+        *app.state::<AppState>().tray.lock().unwrap() = Some(tray);
+    }
+}
+
+fn accelerator_error_message(error: crate::app_shell::AcceleratorError) -> String {
+    match error {
+        crate::app_shell::AcceleratorError::Empty => "快捷键不能为空".to_owned(),
+        crate::app_shell::AcceleratorError::MissingModifier => {
+            "快捷键至少需要一个修饰键（Ctrl/Alt/Shift/Win）".to_owned()
+        }
+        crate::app_shell::AcceleratorError::InvalidKey => "快捷键按键无效".to_owned(),
+        crate::app_shell::AcceleratorError::TooManyKeys => "快捷键只能有一个按键".to_owned(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn hotkey_modifiers(
+    accel: &crate::app_shell::Accelerator,
+) -> windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
+    };
+    let flags = accel.modifiers.iter().fold(0u32, |flags, modifier| {
+        flags
+            | match modifier {
+                crate::app_shell::Modifier::Alt => MOD_ALT.0,
+                crate::app_shell::Modifier::Control => MOD_CONTROL.0,
+                crate::app_shell::Modifier::Shift => MOD_SHIFT.0,
+                crate::app_shell::Modifier::Super => MOD_WIN.0,
+            }
+    });
+    HOT_KEY_MODIFIERS(flags)
+}
+
+#[cfg(target_os = "windows")]
+fn hotkey_virtual_key(accel: &crate::app_shell::Accelerator) -> Option<u32> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_BACK, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB,
+        VK_UP,
+    };
+    let key = accel.key.as_str();
+    if key.len() == 1 {
+        let ch = key.as_bytes().first().copied()?;
+        if ch.is_ascii_alphanumeric() {
+            return Some(ch as u32);
+        }
+        return None;
+    }
+    Some(match key {
+        "Space" => VK_SPACE.0 as u32,
+        "Enter" => VK_RETURN.0 as u32,
+        "Esc" => VK_ESCAPE.0 as u32,
+        "Tab" => VK_TAB.0 as u32,
+        "Up" => VK_UP.0 as u32,
+        "Down" => VK_DOWN.0 as u32,
+        "Left" => VK_LEFT.0 as u32,
+        "Right" => VK_RIGHT.0 as u32,
+        "Backspace" => VK_BACK.0 as u32,
+        "Delete" => VK_DELETE.0 as u32,
+        _ if key.starts_with('F') && key.len() >= 2 && key.len() <= 3 => {
+            0x70 + key[1..].parse::<u32>().ok()? - 1
+        }
+        _ => return None,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn start_hotkey_listener(app: &AppHandle, accelerator: Option<&crate::app_shell::Accelerator>) {
+    use windows::Win32::{
+        System::Threading::GetCurrentThreadId,
+        UI::Input::KeyboardAndMouse::RegisterHotKey,
+        UI::WindowsAndMessaging::{GetMessageW, PostThreadMessageW, MSG, WM_HOTKEY, WM_QUIT},
+    };
+    let state = app.state::<AppState>();
+    if let Some(thread_id) = state.hotkey_thread_id.lock().unwrap().take() {
+        unsafe {
+            let _ = PostThreadMessageW(
+                thread_id,
+                WM_QUIT,
+                windows::Win32::Foundation::WPARAM(0),
+                windows::Win32::Foundation::LPARAM(0),
+            );
+        }
+    }
+    let Some(accelerator) = accelerator else {
+        return;
+    };
+    let Some(vk) = hotkey_virtual_key(accelerator) else {
+        let _ = app.emit("jarvis-hotkey-error", json!({"error": "快捷键按键无效"}));
+        return;
+    };
+    let modifiers = hotkey_modifiers(accelerator);
+    let app = app.clone();
+    let (sender, receiver) = std::sync::mpsc::channel::<u32>();
+    std::thread::spawn(move || unsafe {
+        let thread_id = GetCurrentThreadId();
+        let _ = sender.send(thread_id);
+        const HOTKEY_ID: i32 = 0x4A52;
+        if RegisterHotKey(None, HOTKEY_ID, modifiers, vk).is_err() {
+            let _ = app.emit(
+                "jarvis-hotkey-error",
+                json!({"error": "快捷键注册失败，可能已被其他程序占用"}),
+            );
+            return;
+        }
+        let mut message = MSG::default();
+        while GetMessageW(&mut message, None, 0, 0).as_bool() {
+            if message.message == WM_HOTKEY {
+                let wake_app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    handle_voice_event(wake_app.clone(), crate::app_shell::wake_entry()).await;
+                    raise_jarvis_window(&wake_app);
+                });
+            }
+        }
+    });
+    if let Ok(thread_id) = receiver.recv_timeout(Duration::from_secs(2)) {
+        *state.hotkey_thread_id.lock().unwrap() = Some(thread_id);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn start_hotkey_listener(_app: &AppHandle, _accelerator: Option<&crate::app_shell::Accelerator>) {}
+
+fn restart_hotkey_from_settings(app: &AppHandle) {
+    let settings = load_settings(app);
+    let Some(hotkey) = settings.hotkey.as_deref() else {
+        start_hotkey_listener(app, None);
+        return;
+    };
+    match crate::app_shell::parse_accelerator(hotkey) {
+        Ok(accelerator) => {
+            if crate::app_shell::has_conflict(
+                &accelerator,
+                &crate::app_shell::reserved_accelerators(),
+            ) {
+                let _ = app.emit(
+                    "jarvis-hotkey-error",
+                    json!({"error": "与系统保留快捷键冲突"}),
+                );
+                start_hotkey_listener(app, None);
+            } else {
+                start_hotkey_listener(app, Some(&accelerator));
+            }
+        }
+        Err(error) => {
+            let _ = app.emit(
+                "jarvis-hotkey-error",
+                json!({"error": accelerator_error_message(error)}),
+            );
+            start_hotkey_listener(app, None);
+        }
+    }
+}
+
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     let directory = app
         .path()
@@ -1868,6 +2150,8 @@ fn settings_dto(app: &AppHandle) -> SettingsDto {
         speech_style: settings.speech_style,
         codex_binary: settings.codex_binary,
         autostart: settings.autostart,
+        hotkey: settings.hotkey,
+        wizard_completed: settings.wizard_completed,
     }
 }
 
@@ -1881,6 +2165,8 @@ struct SettingsDto {
     speech_style: String,
     codex_binary: Option<String>,
     autostart: bool,
+    hotkey: Option<String>,
+    wizard_completed: bool,
 }
 
 #[derive(Deserialize)]
@@ -1892,6 +2178,8 @@ struct SaveSettingsRequest {
     speech_style: String,
     codex_path: Option<String>,
     autostart: Option<bool>,
+    hotkey: Option<String>,
+    wizard_completed: Option<bool>,
 }
 
 #[tauri::command]
@@ -1921,7 +2209,27 @@ async fn save_settings(
     if let Some(autostart) = request.autostart {
         settings.autostart = autostart;
     }
+    if let Some(wizard_completed) = request.wizard_completed {
+        settings.wizard_completed = wizard_completed;
+    }
+    if let Some(hotkey) = request
+        .hotkey
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let accelerator =
+            crate::app_shell::parse_accelerator(hotkey).map_err(accelerator_error_message)?;
+        if crate::app_shell::has_conflict(&accelerator, &crate::app_shell::reserved_accelerators())
+        {
+            return Err("与系统保留快捷键冲突".to_owned());
+        }
+        settings.hotkey = Some(crate::app_shell::format_accelerator(&accelerator));
+    } else if request.hotkey.is_some() {
+        settings.hotkey = None;
+    }
     save_settings_file(&app, &settings)?;
+    restart_hotkey_from_settings(&app);
     let state = app.state::<AppState>();
     if let Some(autostart) = request.autostart {
         let autolaunch = app.autolaunch();
@@ -2955,6 +3263,8 @@ pub fn run() {
             voice_status: RwLock::new(VoiceStateInfo::default()),
             stop_step: RwLock::new(StopStep::Start),
             stop_sequence_running: AtomicBool::new(false),
+            tray: StdMutex::new(None),
+            hotkey_thread_id: StdMutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             direct_voice_status,
@@ -2968,6 +3278,7 @@ pub fn run() {
             get_settings,
             save_settings,
             import_legacy_settings,
+            wizard_status,
             consume_cold_wake,
             runtime_state,
             default_workspace,
@@ -2997,6 +3308,8 @@ pub fn run() {
                 let _ = app.autolaunch().disable();
             }
             apply_log_rotation(app.handle());
+            build_tray(app.handle());
+            restart_hotkey_from_settings(app.handle());
             if let Some(window) = app.get_webview_window("main") {
                 if background_start {
                     let _ = window.hide();

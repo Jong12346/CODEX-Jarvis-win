@@ -223,6 +223,16 @@ struct WakeProtocolLog {
     event: &'static str,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WakeSupervisorLog {
+    schema_version: u8,
+    timestamp_ms: u128,
+    event: &'static str,
+    exit_code: Option<i32>,
+    mic_released: bool,
+}
+
 #[derive(Default)]
 struct RuntimeTransitionDetails {
     pid: Option<u32>,
@@ -2413,6 +2423,7 @@ fn start_wake_supervisor(app: AppHandle) {
             let mut mic_released = false;
             let spawned_at = std::time::Instant::now();
             let mut release_requested_at: Option<std::time::Instant> = None;
+            let mut woke_at: Option<std::time::Instant> = None;
 
             loop {
                 let content = fs::read_to_string(&event_file).unwrap_or_default();
@@ -2442,6 +2453,7 @@ fn start_wake_supervisor(app: AppHandle) {
                         }
                         Some("wake") => {
                             woke = true;
+                            woke_at = Some(std::time::Instant::now());
                             state.wake_enabled.store(false, Ordering::SeqCst);
                             state.wake_ready.store(false, Ordering::SeqCst);
                             raise_jarvis_window(&app);
@@ -2476,7 +2488,11 @@ fn start_wake_supervisor(app: AppHandle) {
                     }
                 }
                 processed = lines.len();
-                if woke || !state.wake_enabled.load(Ordering::SeqCst) {
+                // After a phrase wake, the sidecar still writes
+                // microphoneReleased before exiting. Keep the loop alive so
+                // the 5s release grace below can collect that confirmation,
+                // instead of killing the helper before it releases the mic.
+                if !woke && !state.wake_enabled.load(Ordering::SeqCst) {
                     break;
                 }
                 if child.try_wait().ok().flatten().is_some() {
@@ -2486,8 +2502,9 @@ fn start_wake_supervisor(app: AppHandle) {
                 if release_requested && release_requested_at.is_none() {
                     release_requested_at = Some(std::time::Instant::now());
                     let _ = fs::write(&control_file, "release");
+                    log_wake_protocol_event(&app, "wake.protocol.release_requested");
                 }
-                if let Some(requested_at) = release_requested_at {
+                if let Some(requested_at) = release_requested_at.or(woke_at) {
                     if requested_at.elapsed() >= Duration::from_secs(5) {
                         // 兜底：释放请求超时，只产错误，不推进正常交接。
                         transition_voice_state(
@@ -2518,22 +2535,22 @@ fn start_wake_supervisor(app: AppHandle) {
                 tokio::time::sleep(Duration::from_millis(150)).await;
             }
 
+            #[cfg(target_os = "macos")]
             if woke || !state.wake_enabled.load(Ordering::SeqCst) {
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = Command::new("/usr/bin/pkill")
-                        .args(["-x", "JarvisWakeListener"])
-                        .status()
-                        .await;
-                }
-                #[cfg(target_os = "windows")]
-                if child.try_wait().ok().flatten().is_none() {
-                    // Only terminate the exact helper process owned by this
-                    // supervisor. Never kill by image name on Windows.
-                    let _ = child.kill().await;
-                }
+                let _ = Command::new("/usr/bin/pkill")
+                    .args(["-x", "JarvisWakeListener"])
+                    .status()
+                    .await;
             }
-            let _ = child.wait().await;
+            #[cfg(target_os = "windows")]
+            if !mic_released && child.try_wait().ok().flatten().is_none() {
+                // Kill only when release was never confirmed: after a
+                // phrase wake the helper needs time to write
+                // microphoneReleased and exit. Only the exact helper
+                // process owned by this supervisor is terminated.
+                let _ = child.kill().await;
+            }
+            let exit_code = child.wait().await.ok().and_then(|status| status.code());
             // 内层循环在 wake 处提前退出，但 helper 退出前还会写 microphoneReleased；
             // 释放判定前必须把剩余行读完，否则会把已确认的释放误判为超时。
             let trailing = fs::read_to_string(&event_file).unwrap_or_default();
@@ -2552,6 +2569,19 @@ fn start_wake_supervisor(app: AppHandle) {
                     _ => {}
                 }
             }
+            append_runtime_log(
+                &app,
+                &WakeSupervisorLog {
+                    schema_version: 1,
+                    timestamp_ms: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis(),
+                    event: "wake.protocol.supervisor_exit",
+                    exit_code,
+                    mic_released,
+                },
+            );
             let _ = fs::remove_file(&event_file);
             let _ = fs::remove_file(&control_file);
             *state.wake_control_file.lock().await = None;

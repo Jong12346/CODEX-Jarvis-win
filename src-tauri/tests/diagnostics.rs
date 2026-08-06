@@ -364,16 +364,52 @@ fn verdict_serializes_with_zh_fields() {
 }
 
 #[test]
-fn mic_consent_denied_detects_master_switch() {
-    assert!(mic_consent_denied(Some("Deny"), Some("Allow"), &[]));
-    assert!(!mic_consent_denied(Some("Allow"), Some("Allow"), &[]));
-    assert!(!mic_consent_denied(None, Some("Allow"), &[]));
+fn mic_consent_denied_detects_device_master_switch() {
+    assert!(mic_consent_denied(
+        Some("Deny"),
+        Some("Allow"),
+        Some("Allow"),
+        &[]
+    ));
+    assert!(mic_consent_denied(
+        Some("deny"),
+        Some("Allow"),
+        Some("Allow"),
+        &[]
+    ));
+}
+
+#[test]
+fn mic_consent_denied_detects_user_master_switch() {
+    assert!(mic_consent_denied(
+        Some("Allow"),
+        Some("Deny"),
+        Some("Allow"),
+        &[]
+    ));
+    assert!(!mic_consent_denied(
+        Some("Allow"),
+        Some("Allow"),
+        Some("Allow"),
+        &[]
+    ));
+    assert!(!mic_consent_denied(None, None, Some("Allow"), &[]));
 }
 
 #[test]
 fn mic_consent_denied_detects_desktop_apps_switch() {
-    assert!(mic_consent_denied(Some("Allow"), Some("deny"), &[]));
-    assert!(mic_consent_denied(Some("Allow"), Some("Deny"), &[]));
+    assert!(mic_consent_denied(
+        Some("Allow"),
+        Some("Allow"),
+        Some("deny"),
+        &[]
+    ));
+    assert!(mic_consent_denied(
+        Some("Allow"),
+        Some("Allow"),
+        Some("Deny"),
+        &[]
+    ));
 }
 
 #[test]
@@ -382,11 +418,21 @@ fn mic_consent_denied_detects_jarvis_specific_entry() {
         "C:#Users#u#AppData#Local#Jarvis Codex#wake-helper#JarvisWakeListener.exe",
         Some("Deny"),
     )];
-    assert!(mic_consent_denied(Some("Allow"), Some("Allow"), &entries));
+    assert!(mic_consent_denied(
+        Some("Allow"),
+        Some("Allow"),
+        Some("Allow"),
+        &entries
+    ));
 }
 
 #[test]
 fn mic_consent_denied_ignores_other_apps_entry() {
     let entries = [("C:#Program Files#Other#app.exe", Some("Deny"))];
-    assert!(!mic_consent_denied(Some("Allow"), Some("Allow"), &entries));
+    assert!(!mic_consent_denied(
+        Some("Allow"),
+        Some("Allow"),
+        Some("Allow"),
+        &entries
+    ));
 }

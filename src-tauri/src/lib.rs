@@ -1519,6 +1519,12 @@ fn probe_microphone() -> ProbeResult {
     ) else {
         return ProbeResult::Ok;
     };
+    let device_master = RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .open_subkey(
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone",
+        )
+        .ok()
+        .and_then(|k| k.get_value::<String, _>("Value").ok());
     let master = key.get_value::<String, _>("Value").ok();
     let non_packaged_key = key.open_subkey("NonPackaged");
     let non_packaged = non_packaged_key
@@ -1540,6 +1546,7 @@ fn probe_microphone() -> ProbeResult {
         })
         .unwrap_or_default();
     let denied = mic_consent_denied(
+        device_master.as_deref(),
         master.as_deref(),
         non_packaged.as_deref(),
         &jarvis_entries
@@ -2666,6 +2673,25 @@ fn start_wake_supervisor(app: AppHandle) {
                 )
                 .await;
                 state.wake_enabled.store(false, Ordering::SeqCst);
+            }
+            // A helper that exits right after arming without a wake or a
+            // release request means the recognizer could not keep the
+            // microphone (denied, in use, or no input device). Do not respawn
+            // in a tight loop: surface a readable error and stay stopped.
+            if !woke
+                && !release_was_requested
+                && state.wake_enabled.load(Ordering::SeqCst)
+                && spawned_at.elapsed() < Duration::from_secs(15)
+                && matches!(
+                    state.voice_status.read().await.state,
+                    VoiceState::WakeArming | VoiceState::WakeReady
+                )
+            {
+                *state.wake_authorization.write().await =
+                    "Microphone unavailable or denied: the wake listener could not keep the microphone. Check Windows privacy settings and retry.".to_owned();
+                state.wake_enabled.store(false, Ordering::SeqCst);
+                transition_voice_state(&app, VoiceEvent::WakeError).await;
+                break;
             }
             if !state.wake_enabled.load(Ordering::SeqCst)
                 || !matches!(

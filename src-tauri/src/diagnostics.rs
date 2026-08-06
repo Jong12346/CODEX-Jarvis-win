@@ -110,12 +110,14 @@ pub fn classify(result: ProbeResult) -> Verdict {
 /// decision is testable on any platform.
 #[doc(hidden)]
 pub fn mic_consent_denied(
-    master: Option<&str>,
+    device_master: Option<&str>,
+    user_master: Option<&str>,
     non_packaged: Option<&str>,
     jarvis_entries: &[(&str, Option<&str>)],
 ) -> bool {
     let denied = |value: Option<&str>| value.is_some_and(|text| text.eq_ignore_ascii_case("Deny"));
-    denied(master)
+    denied(device_master)
+        || denied(user_master)
         || denied(non_packaged)
         || jarvis_entries
             .iter()

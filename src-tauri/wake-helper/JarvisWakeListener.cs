@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -53,6 +53,11 @@ internal static class JarvisWakeListener
                 Emit("stopping", "reason", "release");
                 Emit("microphoneReleased", "reason", "release");
                 return 6;
+            }
+            if (args.Any(value => value == "--probe-recognizer"))
+            {
+                // 诊断探针：只查询已安装的语音识别器，不启动音频设备。
+                return SelectRecognizer() == null ? 3 : 0;
             }
 
             RecognizerInfo recognizerInfo = SelectRecognizer();

@@ -1460,6 +1460,317 @@ async fn direct_voice_info(state: &State<'_, AppState>) -> DirectVoiceInfo {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticItem {
+    key: &'static str,
+    verdict: Verdict,
+}
+
+const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
+
+#[cfg(target_os = "windows")]
+fn probe_webview2() -> ProbeResult {
+    use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
+    let Ok(clients) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(
+        r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+    ) else {
+        return ProbeResult::WebView2Missing;
+    };
+    match clients.get_value::<String, _>("pv") {
+        Ok(version) if !version.trim().is_empty() => ProbeResult::Ok,
+        _ => ProbeResult::WebView2Missing,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn probe_webview2() -> ProbeResult {
+    ProbeResult::Ok
+}
+
+#[cfg(target_os = "windows")]
+fn probe_microphone() -> ProbeResult {
+    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+    let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey(
+        r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone",
+    ) else {
+        return ProbeResult::Ok;
+    };
+    match key.get_value::<String, _>("Value") {
+        Ok(value) if value.eq_ignore_ascii_case("Deny") => ProbeResult::MicDenied,
+        _ => ProbeResult::Ok,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn probe_microphone() -> ProbeResult {
+    ProbeResult::Ok
+}
+
+async fn probe_speech_pack(app: &AppHandle) -> ProbeResult {
+    #[cfg(target_os = "windows")]
+    {
+        let Ok(helper) = wake_helper_path(app) else {
+            return ProbeResult::Ok;
+        };
+        let Ok(mut child) = Command::new(helper)
+            .arg("--probe-recognizer")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return ProbeResult::Ok;
+        };
+        match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
+            Ok(Ok(status)) if status.code() == Some(3) => ProbeResult::SpeechPackMissing,
+            _ => ProbeResult::Ok,
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        ProbeResult::Ok
+    }
+}
+
+async fn probe_codex(app: &AppHandle, state: &AppState) -> ProbeResult {
+    if codex_binary_path(app, None).is_err() {
+        return ProbeResult::CodexMissing;
+    }
+    let last_error = state
+        .runtime_status
+        .read()
+        .await
+        .last_error
+        .clone()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if ["401", "unauthorized", "not logged in", "登录已失效"]
+        .iter()
+        .any(|fragment| last_error.contains(fragment))
+    {
+        return ProbeResult::CodexNotLoggedIn;
+    }
+    ProbeResult::Ok
+}
+
+async fn probe_workspace(state: &AppState) -> ProbeResult {
+    let Some(config) = state.desired_runtime.lock().await.clone() else {
+        return ProbeResult::Ok;
+    };
+    match canonicalize_workspace(
+        config.workspace.as_str(),
+        current_platform(),
+        &SystemPathProbe,
+    ) {
+        Ok(_) => ProbeResult::Ok,
+        Err(_) => ProbeResult::WorkspaceUnreadable,
+    }
+}
+
+fn current_proxy_address() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+        let Ok(settings) = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
+        else {
+            return None;
+        };
+        let enabled = settings.get_value::<u32, _>("ProxyEnable").unwrap_or(0);
+        let Ok(raw) = settings.get_value::<String, _>("ProxyServer") else {
+            return None;
+        };
+        if enabled == 0 || raw.trim().is_empty() {
+            return None;
+        }
+        let address = if raw.contains('=') {
+            raw.split(';')
+                .find_map(|entry| entry.split_once('='))
+                .filter(|(scheme, _)| matches!(*scheme, "http" | "https"))
+                .map(|(_, address)| address)
+                .unwrap_or(&raw)
+        } else {
+            &raw
+        };
+        let address = address.trim();
+        Some(if address.contains("://") {
+            address.to_owned()
+        } else {
+            format!("http://{address}")
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var("HTTPS_PROXY")
+            .ok()
+            .or_else(|| std::env::var("HTTP_PROXY").ok())
+    }
+}
+
+fn parse_host_port(target: &str) -> Option<(String, u16)> {
+    let rest = target.split("://").nth(1).unwrap_or(target);
+    let rest = rest.split('/').next().unwrap_or(rest);
+    if let Some((host, port)) = rest.rsplit_once(':') {
+        let port = port.parse().ok()?;
+        return Some((host.to_owned(), port));
+    }
+    let default_port = if target.starts_with("https") { 443 } else { 80 };
+    Some((rest.to_owned(), default_port))
+}
+
+async fn probe_network() -> ProbeResult {
+    let proxy = current_proxy_address();
+    let target = proxy
+        .clone()
+        .unwrap_or_else(|| "https://api.openai.com".to_owned());
+    let Some((host, port)) = parse_host_port(&target) else {
+        return ProbeResult::Ok;
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        use std::net::ToSocketAddrs;
+        let address = (host.as_str(), port)
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| std::io::Error::other("no address"))?;
+        std::net::TcpStream::connect_timeout(&address, Duration::from_secs(3))
+    })
+    .await;
+    match result {
+        Ok(Ok(_)) => ProbeResult::Ok,
+        Ok(Err(_)) if proxy.is_some() => ProbeResult::ProxyUnreachable,
+        Ok(Err(_)) => ProbeResult::NetworkTimeout,
+        Err(_) => ProbeResult::Ok,
+    }
+}
+
+async fn collect_diagnostics(app: &AppHandle, state: &AppState) -> Vec<DiagnosticItem> {
+    vec![
+        DiagnosticItem {
+            key: "windows",
+            verdict: classify(ProbeResult::Ok),
+        },
+        DiagnosticItem {
+            key: "webview2",
+            verdict: classify(probe_webview2()),
+        },
+        DiagnosticItem {
+            key: "microphone",
+            verdict: classify(probe_microphone()),
+        },
+        DiagnosticItem {
+            key: "speech_pack",
+            verdict: classify(probe_speech_pack(app).await),
+        },
+        DiagnosticItem {
+            key: "codex",
+            verdict: classify(probe_codex(app, state).await),
+        },
+        DiagnosticItem {
+            key: "workspace",
+            verdict: classify(probe_workspace(state).await),
+        },
+        DiagnosticItem {
+            key: "network",
+            verdict: classify(probe_network().await),
+        },
+    ]
+}
+
+fn apply_log_rotation(app: &AppHandle) {
+    let Ok(directory) = app.path().app_log_dir() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&directory) else {
+        return;
+    };
+    let mut files = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if !name.starts_with("jarvis-runtime") || !name.ends_with(".jsonl") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let modified_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        files.push(LogFileInfo {
+            name,
+            size_bytes: metadata.len(),
+            modified_ms,
+        });
+    }
+    let main_name = "jarvis-runtime.jsonl";
+    if let Some(main) = files.iter().find(|file| file.name == main_name) {
+        if main.size_bytes > MAX_LOG_BYTES {
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let archived = format!("jarvis-runtime-{timestamp}.jsonl");
+            let _ = fs::rename(directory.join(main_name), directory.join(&archived));
+            files.push(LogFileInfo {
+                name: archived,
+                size_bytes: main.size_bytes,
+                modified_ms: timestamp as u64,
+            });
+            files.retain(|file| file.name != main_name);
+        }
+    }
+    let plan = rotate_plan(files, MAX_LOG_BYTES);
+    for name in plan.delete {
+        let _ = fs::remove_file(directory.join(name));
+    }
+}
+
+#[tauri::command]
+async fn run_diagnostics(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<DiagnosticItem>, String> {
+    apply_log_rotation(&app);
+    Ok(collect_diagnostics(&app, &state).await)
+}
+
+#[tauri::command]
+async fn copy_diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    apply_log_rotation(&app);
+    let items = collect_diagnostics(&app, &state).await;
+    let mut lines = Vec::new();
+    lines.push("Jarvis 一键诊断（已脱敏）".to_owned());
+    for item in items {
+        lines.push(format!(
+            "[{:?}] {}（{}）：{}",
+            item.verdict.level,
+            item.verdict.message_zh,
+            item.verdict.code,
+            item.verdict.suggested_action_zh
+        ));
+    }
+    if let Ok(directory) = app.path().app_log_dir() {
+        if let Ok(content) = fs::read_to_string(directory.join("jarvis-runtime.jsonl")) {
+            let tail: Vec<&str> = content.lines().rev().take(20).collect();
+            if !tail.is_empty() {
+                lines.push("--- 最近日志（已脱敏）---".to_owned());
+                lines.push(tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
+            }
+        }
+    }
+    Ok(redact(&lines.join("\n")))
+}
+
 #[tauri::command]
 async fn direct_voice_status(state: State<'_, AppState>) -> Result<DirectVoiceInfo, String> {
     Ok(direct_voice_info(&state).await)
@@ -2461,6 +2772,8 @@ pub fn run() {
             wake_listener_status,
             voice_state,
             report_voice_event,
+            run_diagnostics,
+            copy_diagnostics,
             consume_cold_wake,
             runtime_state,
             default_workspace,
@@ -2484,6 +2797,7 @@ pub fn run() {
                 Some(vec!["--background"]),
             ))?;
             let _ = app.autolaunch().enable();
+            apply_log_rotation(app.handle());
             if let Some(window) = app.get_webview_window("main") {
                 if background_start {
                     let _ = window.hide();

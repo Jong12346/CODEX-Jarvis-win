@@ -95,6 +95,19 @@ test("--test-release confirms microphone release before exit", windowsOnly, () =
   assert.equal(events[2].reason, "release");
 });
 
+test("--probe-recognizer exits 0 or 3 without touching audio", windowsOnly, () => {
+  // The Rust diagnostics probe uses this to classify speech_pack_missing.
+  // Exit 3 means no installed recognizer; 0 means one is present.
+  const result = spawnSync(helper, ["--probe-recognizer"], {
+    encoding: "buffer",
+    timeout: 30_000,
+  });
+  assert.ok(
+    result.status === 0 || result.status === 3,
+    `expected 0 (present) or 3 (missing), got ${result.status}`,
+  );
+});
+
 });
 
 test("every event line carries a type discriminator", windowsOnly, () => {

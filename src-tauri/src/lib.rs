@@ -24,6 +24,7 @@ use tokio::{
 mod diagnostics;
 mod process;
 mod runtime_state;
+mod settings_store;
 mod stop_sequence;
 mod voice_state;
 mod workspace;
@@ -40,6 +41,11 @@ pub use runtime_state::{
     request_rejection, restart_backoff, runtime_state_transition, should_watcher_restart,
     stability_reset_interval, RequestRejection, RuntimeEvent, RuntimeGeneration, RuntimeState,
     MAX_AUTO_RESTARTS,
+};
+#[doc(hidden)]
+pub use settings_store::{
+    import_legacy, migrate, resolve_stored_permission, upsert_thread, write_plan, Settings,
+    SettingsError, ThreadMapping, WritePlan, SETTINGS_SCHEMA_VERSION,
 };
 #[doc(hidden)]
 pub use stop_sequence::{

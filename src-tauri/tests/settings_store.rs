@@ -1,4 +1,4 @@
-﻿//! Phase 5 contract: versioned backend settings store.
+//! Phase 5 contract: versioned backend settings store.
 //!
 //! Activation note (same as phases 1-4): this file lives here until the
 //! symbols exist, then the implementation commit moves it into
@@ -40,15 +40,32 @@ fn id(path: &str) -> WorkspaceId {
         .id
 }
 
+struct CaseFoldingProbe;
+
+impl PathProbe for CaseFoldingProbe {
+    fn is_dir(&self, _path: &str) -> bool {
+        true
+    }
+    fn real_path(&self, path: &str) -> Result<String, WorkspaceError> {
+        // 模拟 Windows 文件系统按磁盘实际大小写归一：同一目录的所有大小写
+        // 写法都解析到同一规范路径。
+        let cleaned = path.trim_end_matches('\\');
+        if cleaned.to_ascii_lowercase().contains(r"c:\users\dell\proj") {
+            Ok(r"\\?\C:\Users\DELL\proj".to_owned())
+        } else {
+            Ok(format!(r"\\?\{}", cleaned))
+        }
+    }
+}
 fn snapshot_with_competing_threads() -> Value {
     json!({
         "jarvis.workspace": r"C:\Users\DELL\proj",
         "jarvis.permissionMode": "auto",
         "jarvis.speechStyle": "shaanxi",
         "jarvis.codexBinary": r"C:\tools\codex.exe",
-        "jarvis.threadId:C:\Users\DELL\proj": "t-canonical",
-        "jarvis.threadId:c:\users\dell\proj\": "t-lower",
-        "jarvis.threadId:\\?\C:\Users\DELL\proj": "t-extended",
+        r"jarvis.threadId:C:\Users\DELL\proj": "t-canonical",
+        r"jarvis.threadId:c:\users\dell\proj\": "t-lower",
+        r"jarvis.threadId:\\?\C:\Users\DELL\proj": "t-extended",
     })
 }
 
@@ -119,7 +136,16 @@ fn threads_round_trip_through_json() {
 
 #[test]
 fn import_legacy_folds_competing_spellings_into_one_record() {
-    let settings = import_legacy(&snapshot_with_competing_threads(), Platform::Windows, &AnyDir);
+    let settings = import_legacy(
+        &snapshot_with_competing_threads(),
+        Platform::Windows,
+        &CaseFoldingProbe,
+    );
+    assert_eq!(
+        settings.threads.len(),
+        1,
+        "one directory must produce one mapping"
+    );
     let canonical = id(r"C:\Users\DELL\proj").as_str().to_owned();
     let matches: Vec<&ThreadMapping> = settings
         .threads
@@ -127,11 +153,17 @@ fn import_legacy_folds_competing_spellings_into_one_record() {
         .filter(|mapping| mapping.workspace == canonical)
         .collect();
     assert_eq!(matches.len(), 1, "one directory must produce one mapping");
-    assert_eq!(matches[0].thread_id, "t-canonical", "the canonical spelling wins");
+    assert_eq!(
+        matches[0].thread_id, "t-canonical",
+        "the canonical spelling wins"
+    );
     assert_eq!(settings.workspace.as_deref(), Some(canonical.as_str()));
     assert_eq!(settings.permission_mode, "auto");
     assert_eq!(settings.speech_style, "shaanxi");
-    assert_eq!(settings.codex_binary.as_deref(), Some(r"C:\tools\codex.exe"));
+    assert_eq!(
+        settings.codex_binary.as_deref(),
+        Some(r"C:\tools\codex.exe")
+    );
 }
 
 #[test]
@@ -143,19 +175,27 @@ fn import_legacy_handles_case_slashes_trailing_and_extended_prefix() {
         r"C:/Users/DELL/proj",
         r"\\?\C:\Users\DELL\proj",
     ];
-    let canonical = id(r"C:\Users\DELL\proj");
+    let canonical =
+        canonicalize_workspace(r"C:\Users\DELL\proj", Platform::Windows, &CaseFoldingProbe)
+            .expect("canonical path resolves")
+            .id;
     for variant in variants {
-        let canonicalized = id(variant);
-        assert_eq!(canonicalized, canonical, "{variant} must map to one workspace id");
+        let canonicalized = canonicalize_workspace(variant, Platform::Windows, &CaseFoldingProbe)
+            .expect("variant resolves")
+            .id;
+        assert_eq!(
+            canonicalized, canonical,
+            "{variant} must map to one workspace id"
+        );
     }
     let snapshot = json!({
         "jarvis.workspace": r"C:\Users\DELL\proj",
-        "jarvis.threadId:C:\Users\DELL\proj": "t-1",
-        "jarvis.threadId:c:\users\dell\proj": "t-2",
-        "jarvis.threadId:C:\Users\DELL\proj\": "t-3",
-        "jarvis.threadId:\\?\C:\Users\DELL\proj": "t-4",
+        r"jarvis.threadId:C:\Users\DELL\proj": "t-1",
+        r"jarvis.threadId:c:\users\dell\proj": "t-2",
+        r"jarvis.threadId:C:\Users\DELL\proj\": "t-3",
+        r"jarvis.threadId:\\?\C:\Users\DELL\proj": "t-4",
     });
-    let settings = import_legacy(&snapshot, Platform::Windows, &AnyDir);
+    let settings = import_legacy(&snapshot, Platform::Windows, &CaseFoldingProbe);
     assert_eq!(settings.threads.len(), 1);
     assert_eq!(settings.threads[0].workspace, canonical.as_str());
 }
@@ -163,8 +203,8 @@ fn import_legacy_handles_case_slashes_trailing_and_extended_prefix() {
 #[test]
 fn import_legacy_keeps_distinct_directories_separate() {
     let snapshot = json!({
-        "jarvis.threadId:C:\Users\DELL\proj": "t-a",
-        "jarvis.threadId:E:\Work\proj": "t-b",
+        r"jarvis.threadId:C:\Users\DELL\proj": "t-a",
+        r"jarvis.threadId:E:\Work\proj": "t-b",
     });
     let settings = import_legacy(&snapshot, Platform::Windows, &AnyDir);
     assert_eq!(settings.threads.len(), 2);
@@ -191,7 +231,7 @@ fn import_legacy_ignores_unreadable_workspaces() {
     }
     let snapshot = json!({
         "jarvis.workspace": r"C:\gone\missing",
-        "jarvis.threadId:C:\gone\missing": "t-x",
+        r"jarvis.threadId:C:\gone\missing": "t-x",
     });
     let settings = import_legacy(&snapshot, Platform::Windows, &NotFound);
     assert!(settings.workspace.is_none());
@@ -240,7 +280,10 @@ fn stored_safe_stays_safe() {
 #[test]
 fn missing_workspace_resolves_to_safe() {
     let home = id(r"C:\Users\DELL");
-    assert_eq!(resolve_stored_permission("full", None, &home, Platform::Windows), "safe");
+    assert_eq!(
+        resolve_stored_permission("full", None, &home, Platform::Windows),
+        "safe"
+    );
 }
 
 #[test]

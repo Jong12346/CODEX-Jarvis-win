@@ -1329,6 +1329,22 @@ $("#save-settings").addEventListener("click", async () => {
       response.textContent += " 下一次任务将在所选目录续接 Codex thread。";
       await armWakeListener();
     }
+  } else {
+    try {
+      state.settings = await invoke<SettingsDto>("save_settings", {
+        request: {
+          workspace: nextWorkspace.id,
+          threadId: savedThreadId() ?? undefined,
+          permissionMode: nextPermission,
+          speechStyle: nextSpeechStyle,
+          codexPath: nextCodexBinary || null,
+          hotkey: ($("#hotkey-setting") as HTMLInputElement).value.trim() || null,
+        },
+      });
+      response.textContent = `Runtime settings saved (${permissionLabel(permissionMode)} · ${speechStyleLabels[speechStyle]}).`;
+    } catch (error) {
+      response.textContent = `保存失败：${String(error)}`;
+    }
   }
   settings.close();
 });

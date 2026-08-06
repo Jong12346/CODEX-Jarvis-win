@@ -2196,7 +2196,11 @@ fn settings_dto(app: &AppHandle) -> SettingsDto {
         })
         .map(|mapping| mapping.thread_id.clone());
     SettingsDto {
-        present: true,
+        present: settings.workspace.is_some()
+            || !settings.threads.is_empty()
+            || settings.hotkey.is_some()
+            || settings.wizard_completed
+            || settings.codex_binary.is_some(),
         workspace: workspace.map(|workspace| workspace.as_str().to_owned()),
         thread_id,
         permission_mode,

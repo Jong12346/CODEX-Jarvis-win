@@ -1,3 +1,4 @@
+
 // Behavior tests for the Windows wake sidecar's JSONL contract.
 //
 // These execute the real JarvisWakeListener.exe and assert on what it writes.
@@ -72,6 +73,28 @@ test("--test-wake writes the documented event sequence", windowsOnly, () => {
   );
   assert.equal(events[0].status, "authorized");
   assert.equal(events[2].phrase, "test");
+test("--test-release confirms microphone release before exit", windowsOnly, () => {
+  // The Rust supervisor only emits voiceMayAcquireMicrophone after the sidecar
+  // has exited AND written microphoneReleased. This mode exercises the exact
+  // bytes of that handoff without touching an audio device.
+  const eventFile = newEventFile();
+  const controlFile = join(mkdtempSync(join(tmpdir(), "jarvis-wake-")), "control.txt");
+  writeFileSync(controlFile, "release");
+  const result = spawnSync(
+    helper,
+    ["--test-release", "--event-file", eventFile, "--control-file", controlFile],
+    { encoding: "buffer", timeout: 30_000 },
+  );
+  assert.equal(result.status, 6, "--test-release must exit 6 after releasing");
+  const events = parseEvents(readFileSync(eventFile).toString("utf8"));
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ["authorization", "ready", "stopping", "microphoneReleased"],
+    "stopping must be reported before the microphone is released",
+  );
+  assert.equal(events[2].reason, "release");
+});
+
 });
 
 test("every event line carries a type discriminator", windowsOnly, () => {

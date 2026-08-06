@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -29,7 +29,9 @@ internal static class JarvisWakeListener
     public static int Main(string[] args)
     {
         string eventFile = Argument(args, "--event-file");
+        string controlFile = Argument(args, "--control-file");
         bool testWake = args.Any(value => value == "--test-wake");
+        bool testRelease = args.Any(value => value == "--test-release");
         try
         {
             if (!string.IsNullOrWhiteSpace(eventFile))
@@ -44,6 +46,14 @@ internal static class JarvisWakeListener
                 Emit("wake", "phrase", "test");
                 return 0;
             }
+            if (testRelease)
+            {
+                Emit("ready", "culture", "test");
+                WaitForRelease(controlFile);
+                Emit("stopping", "reason", "release");
+                Emit("microphoneReleased", "reason", "release");
+                return 6;
+            }
 
             RecognizerInfo recognizerInfo = SelectRecognizer();
             if (recognizerInfo == null)
@@ -52,6 +62,7 @@ internal static class JarvisWakeListener
                 return 3;
             }
 
+            bool releaseRequested = false;
             using (var recognizer = new SpeechRecognitionEngine(recognizerInfo.Id))
             {
                 LoadWakeGrammar(recognizer, recognizerInfo.Culture);
@@ -65,10 +76,24 @@ internal static class JarvisWakeListener
                 recognizer.SetInputToDefaultAudioDevice();
                 Emit("ready", "culture", recognizerInfo.Culture.Name);
                 recognizer.RecognizeAsync(RecognizeMode.Multiple);
-                Finished.WaitOne();
+                while (!Finished.WaitOne(120))
+                {
+                    if (ReleaseRequested(controlFile))
+                    {
+                        releaseRequested = true;
+                        Emit("stopping", "reason", "release");
+                        recognizer.RecognizeAsyncCancel();
+                        break;
+                    }
+                }
                 recognizer.RecognizeAsyncCancel();
             }
-            return Volatile.Read(ref woke) == 1 ? 0 : 2;
+            // 释放确认只能在识别器（音频设备）真正释放之后发出。
+            Emit(
+                "microphoneReleased",
+                "reason",
+                Volatile.Read(ref woke) == 1 ? "wake" : (releaseRequested ? "release" : "stop"));
+            return Volatile.Read(ref woke) == 1 ? 0 : (releaseRequested ? 6 : 2);
         }
         catch (UnauthorizedAccessException)
         {
@@ -84,6 +109,25 @@ internal static class JarvisWakeListener
         finally
         {
             if (eventWriter != null) eventWriter.Dispose();
+        }
+    }
+
+    private static void WaitForRelease(string controlFile)
+    {
+        while (!ReleaseRequested(controlFile)) Thread.Sleep(50);
+    }
+
+    private static bool ReleaseRequested(string controlFile)
+    {
+        if (string.IsNullOrWhiteSpace(controlFile)) return false;
+        try
+        {
+            return File.Exists(controlFile)
+                && File.ReadAllText(controlFile).Trim().Equals("release", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 

@@ -29,6 +29,18 @@ type RuntimeStateInfo = {
   lastErrorCode?: string;
   lastError?: string;
 };
+type VoiceStateName = "booting" | "wakeArming" | "wakeReady" | "wakeDetected" | "wakeReleasingMicrophone" | "voiceAcquiringMicrophone" | "voiceConnecting" | "voiceListening" | "voiceSpeaking" | "working" | "voiceStopping" | "wakeRearming" | "degraded" | "stopping";
+type VoiceStateInfo = {
+  state: VoiceStateName;
+  micOwner: "none" | "wake" | "voice";
+  reconnectAttempts: number;
+  degraded?: {
+    errorKind: string;
+    recoverable: boolean;
+    suggestedAction: string;
+    owner: "none" | "wake" | "voice";
+  };
+};
 type WakeStatus = {
   enabled: boolean;
   ready: boolean;
@@ -48,6 +60,7 @@ type PermissionResolution = {
 type SpeechStyle = "mandarin" | "shaanxi";
 
 const state = {
+  voice: null as VoiceStateInfo | null,
   mode: "booting" as Mode,
   session: null as Session | null,
   directVoice: null as DirectVoice | null,
@@ -135,14 +148,7 @@ let remoteAnalyser: AnalyserNode | null = null;
 let userTranscriptBuffer = "";
 let assistantTranscriptBuffer = "";
 let agentMessageBuffer = "";
-let voiceStartInFlight = false;
-let recoverableColdStartError = false;
-let realtimeReconnectAttempts = 0;
-let realtimeReconnectTimer: number | null = null;
-let realtimeStableTimer: number | null = null;
-let pendingRealtimeReconnect = false;
-let lastRealtimeError = "";
-const MAX_REALTIME_RECONNECTS = 3;
+let allTracksEnded = false;
 const voiceAudio = new Audio();
 voiceAudio.autoplay = true;
 const previewParams = new URLSearchParams(window.location.search);
@@ -575,10 +581,7 @@ updateAudioMeters();
 
 function updateVoiceInfo(info: DirectVoice) {
   state.directVoice = info;
-  mic.classList.toggle("active", info.voiceActive);
-  $("#voice-auth").textContent = info.codexConnected
-    ? `${info.protocol} · ${info.voiceActive ? "connected" : info.phase}`
-    : `${info.protocol} · standby`;
+  // 麦克风持有由 jarvis-voice-state 驱动，这里不再推断连接状态。
   if (info.threadId) {
     state.session = { threadId: info.threadId, cwd: workspace.id };
     $("#thread-id").textContent = info.threadId;
@@ -586,7 +589,7 @@ function updateVoiceInfo(info: DirectVoice) {
   }
 }
 
-async function handle(message: Message) {
+﻿async function handle(message: Message) {
   if (message.id !== undefined && message.method) {
     triggerCharacterAction("approval", 1800);
     approvalId = message.id; $("#approval-copy").textContent = `Codex 请求：${message.method}`; approval.showModal(); return;
@@ -602,13 +605,6 @@ async function handle(message: Message) {
       response.textContent = `Codex Voice SDP 连接失败：${String(error)}`;
     }
   } else if (method === "thread/realtime/started") {
-    pendingRealtimeReconnect = false;
-    lastRealtimeError = "";
-    if (realtimeStableTimer !== null) window.clearTimeout(realtimeStableTimer);
-    realtimeStableTimer = window.setTimeout(() => {
-      realtimeReconnectAttempts = 0;
-      realtimeStableTimer = null;
-    }, 90_000);
     updateVoiceInfo({
       codexConnected: true,
       voiceActive: true,
@@ -652,23 +648,13 @@ async function handle(message: Message) {
     }
   } else if (method === "thread/realtime/error") {
     const detail = String(params?.message ?? "Codex Voice realtime error");
-    lastRealtimeError = detail;
-    pendingRealtimeReconnect = !state.manualStop
-      && isRecoverableRealtimeError(detail)
-      && realtimeReconnectAttempts < MAX_REALTIME_RECONNECTS;
-    if (realtimeStableTimer !== null) {
-      window.clearTimeout(realtimeStableTimer);
-      realtimeStableTimer = null;
-    }
     triggerCharacterAction("error");
-    setMode(pendingRealtimeReconnect ? "voice-starting" : "degraded");
-    banner.hidden = pendingRealtimeReconnect;
+    // 重连或进入 Degraded 由后端状态机驱动，前端只展示错误细节。
     $("#degraded-copy").textContent = detail;
-    response.textContent = pendingRealtimeReconnect
-      ? "Voice 网络连接中断，正在准备自动恢复…"
-      : detail;
+    response.textContent = detail;
   } else if (method === "thread/realtime/closed") {
     cleanupPeer();
+    stopLocalTracks();
     updateVoiceInfo({
       codexConnected: true,
       voiceActive: false,
@@ -676,20 +662,7 @@ async function handle(message: Message) {
       protocol: "Codex app-server V3 · WebRTC",
       threadId: params?.threadId ?? state.session?.threadId,
     });
-    if (pendingRealtimeReconnect && !state.manualStop) {
-      pendingRealtimeReconnect = false;
-      scheduleRealtimeReconnect(lastRealtimeError);
-      return;
-    }
-    if (!state.manualStop) {
-      const failed = Boolean(lastRealtimeError);
-      setMode(failed ? "degraded" : "ready");
-      banner.hidden = !failed;
-      response.textContent = failed
-        ? lastRealtimeError
-        : "Codex Voice 已结束。再次说“嗨 Jarvis”即可唤醒。";
-      await armWakeListener();
-    }
+    // 状态推进（VoiceStopped -> WakeRearming -> WakeReady）由 jarvis-voice-state 驱动。
   } else if (method === "turn/started") {
     if (state.manualStop) return;
     agentMessageBuffer = "";
@@ -709,8 +682,7 @@ async function handle(message: Message) {
     }
   } else if (method === "item/started") {
     if (!state.manualStop) setWorker(roleOf(params), "Working");
-  }
-  else if (method === "item/completed") {
+  } else if (method === "item/completed") {
     setWorker(roleOf(params), "Complete", false);
     if (params?.item?.type === "agentMessage") {
       const text = typeof params.item.text === "string" ? params.item.text : agentMessageBuffer;
@@ -748,8 +720,6 @@ function attachAnalyser(stream: MediaStream, target: "microphone" | "remote") {
 function cleanupPeer() {
   peer?.close();
   peer = null;
-  microphoneStream?.getTracks().forEach((track) => track.stop());
-  microphoneStream = null;
   remoteStream?.getTracks().forEach((track) => track.stop());
   remoteStream = null;
   voiceAudio.pause();
@@ -761,178 +731,177 @@ function cleanupPeer() {
 const sleep = (milliseconds: number) =>
   new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 
-function isRecoverableRealtimeError(error: unknown) {
-  const detail = String(error).toLowerCase();
-  return [
-    "connection reset",
-    "peer closed connection",
-    "failed to read websocket",
-    "failed to connect realtime websocket",
-    "without closing handshake",
-    "os error 10060",
-    "timed out",
-  ].some((fragment) => detail.includes(fragment));
+function reportVoiceEvent(event: string): Promise<VoiceStateInfo> {
+  return invoke<VoiceStateInfo>("report_voice_event", { event }).then(applyVoiceState);
 }
 
-function cancelRealtimeReconnect(resetAttempts = true) {
-  pendingRealtimeReconnect = false;
-  lastRealtimeError = "";
-  if (realtimeReconnectTimer !== null) {
-    window.clearTimeout(realtimeReconnectTimer);
-    realtimeReconnectTimer = null;
+function voiceCopy(stateName: VoiceStateName): { mode: Mode; title: string } {
+  switch (stateName) {
+    case "booting":
+    case "wakeArming":
+      return { mode: "ready", title: "正在启动唤醒监听…" };
+    case "wakeReady":
+      return { mode: "ready", title: "我在。直接说“嗨 Jarvis”。" };
+    case "wakeDetected":
+    case "wakeReleasingMicrophone":
+    case "voiceAcquiringMicrophone":
+    case "voiceConnecting":
+      return { mode: "voice-starting", title: "正在交接麦克风并建立 Codex Voice…" };
+    case "voiceListening":
+    case "voiceSpeaking":
+      return { mode: "listening", title: "Codex 官方 Voice 已上线。你现在可以直接和 Jarvis 对话。" };
+    case "working":
+      return { mode: "working", title: "" };
+    case "voiceStopping":
+    case "wakeRearming":
+      return { mode: "ready", title: "正在停止 Voice 并重新布防…" };
+    case "degraded":
+      return { mode: "degraded", title: "" };
+    case "stopping":
+      return { mode: "stopped", title: "已停止。" };
   }
-  if (realtimeStableTimer !== null) {
-    window.clearTimeout(realtimeStableTimer);
-    realtimeStableTimer = null;
-  }
-  if (resetAttempts) realtimeReconnectAttempts = 0;
 }
 
-function scheduleRealtimeReconnect(detail: string) {
-  if (state.manualStop || realtimeReconnectAttempts >= MAX_REALTIME_RECONNECTS) {
-    setMode("degraded");
+function applyVoiceState(info: VoiceStateInfo): VoiceStateInfo {
+  state.voice = info;
+  mic.classList.toggle("active", info.micOwner === "voice");
+  $("#voice-auth").textContent = `Codex app-server V3 · ${
+    info.micOwner === "voice" || info.state === "voiceAcquiringMicrophone" || info.state === "voiceConnecting"
+      ? "connecting"
+      : info.state === "wakeReady" ? "standby" : info.state
+  }`;
+  const copy = voiceCopy(info.state);
+  if (state.manualStop && (info.state === "wakeReady" || info.state === "wakeArming")) {
+    setMode("stopped");
+    response.textContent = "已停止。说“嗨 Jarvis”或点麦克风重新开始。";
+  } else {
+    setMode(copy.mode);
+    if (copy.title) response.textContent = copy.title;
+  }
+  if (info.state === "degraded" && info.degraded) {
     banner.hidden = false;
+    const detail = info.degraded.suggestedAction;
     $("#degraded-copy").textContent = detail;
-    response.textContent = `${detail}（自动恢复次数已用完，请检查 VPN/代理后重新唤醒。）`;
-    void armWakeListener();
-    return;
+    response.textContent = detail;
+  } else if (info.state !== "degraded") {
+    banner.hidden = true;
   }
-  realtimeReconnectAttempts += 1;
-  const delay = 800 * (2 ** (realtimeReconnectAttempts - 1));
-  setMode("voice-starting");
-  banner.hidden = true;
-  response.textContent = `Voice 网络瞬断，${delay / 1000} 秒后自动恢复（${realtimeReconnectAttempts}/${MAX_REALTIME_RECONNECTS}）…`;
-  realtimeReconnectTimer = window.setTimeout(() => {
-    realtimeReconnectTimer = null;
-    if (!state.manualStop) void startDirectVoice({ reconnect: true });
-  }, delay);
+  if (info.state === "voiceAcquiringMicrophone") {
+    void acquireVoiceMicrophone();
+  } else if (info.state === "voiceConnecting" && info.reconnectAttempts > 0 && !peer) {
+    void reconnectVoice();
+  }
+  maybeReportAllTracksEnded();
+  return info;
 }
 
-function isNotAllowedError(error: unknown) {
-  return error instanceof DOMException
-    ? error.name === "NotAllowedError"
-    : String(error).includes("NotAllowedError");
-}
-
-async function acquireMicrophone(coldStart: boolean) {
-  const attempts = coldStart ? 6 : 1;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      return await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-    } catch (error) {
-      if (!coldStart || !isNotAllowedError(error) || attempt === attempts) throw error;
-      response.textContent = `正在等待系统释放麦克风… ${attempt}/${attempts - 1}`;
-      await sleep(700);
-    }
-  }
-  throw new Error("麦克风初始化失败");
-}
-
-async function startDirectVoice(
-  { coldStart = false, reconnect = false }: { coldStart?: boolean; reconnect?: boolean } = {},
-) {
-  if (!currentWindow) {
-    setMode("voice-starting");
-    window.setTimeout(() => setMode("listening"), FORMATION_DURATION);
-    return;
-  }
-  if (voiceStartInFlight || peer || state.directVoice?.voiceActive) return;
-  if (!reconnect) cancelRealtimeReconnect();
-  voiceStartInFlight = true;
-  state.manualStop = false;
-  recoverableColdStartError = false;
-  setMode("voice-starting");
-  banner.hidden = true;
-  response.textContent = "正在建立 Codex 官方 Voice V3 WebRTC 会话…";
+async function acquireVoiceMicrophone() {
+  if (peer || state.voice?.micOwner === "voice") return;
+  allTracksEnded = false;
   try {
-    const microphoneAuthorization = await invoke<string>("request_microphone_permission");
-    if (microphoneAuthorization !== "authorized") {
+    const authorization = await invoke<string>("request_microphone_permission");
+    if (authorization !== "authorized") {
       throw new Error("请在系统设置 → 隐私与安全性 → 麦克风中允许 Jarvis Codex。");
     }
-    await invoke("disarm_wake_listener");
-    if (coldStart) {
-      // A newly created WKWebView can reject an otherwise-authorized
-      // getUserMedia call until its first visible/focused render cycle.
-      await new Promise<void>((resolve) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-      );
-      await sleep(900);
-    }
-    microphoneStream = await acquireMicrophone(coldStart);
-    attachAnalyser(microphoneStream, "microphone");
-
-    const connection = new RTCPeerConnection();
-    peer = connection;
-    const track = microphoneStream.getAudioTracks()[0];
-    if (!track) throw new Error("未找到麦克风音轨");
-    connection.addTrack(track, microphoneStream);
-    connection.createDataChannel("oai-events");
-    connection.ontrack = (event) => {
-      remoteStream = event.streams[0] ?? new MediaStream([event.track]);
-      voiceAudio.srcObject = remoteStream;
-      attachAnalyser(remoteStream, "remote");
-      void audioContext?.resume();
-      void voiceAudio.play();
-    };
-    connection.onconnectionstatechange = () => {
-      if (connection.connectionState === "failed") {
-        setMode("degraded");
-        response.textContent = "Codex Voice WebRTC 连接失败。";
-      }
-    };
-    const offer = await connection.createOffer();
-    await connection.setLocalDescription(offer);
-    await waitForIceGathering(connection);
-    const sdp = connection.localDescription?.sdp;
-    if (!sdp) throw new Error("WebRTC 未生成 SDP offer");
-
-    const info = await invoke<DirectVoice>("start_codex_voice", {
-      request: {
-        cwd: workspace.id,
-        threadId: savedThreadId(),
-        permissionMode,
-        speechStyle,
-        codexPath: codexBinary || null,
-        sdp,
-        voice: "cove",
-      },
+    microphoneStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
-    updateVoiceInfo(info);
+    watchTrackEnded(microphoneStream);
+    attachAnalyser(microphoneStream, "microphone");
+    await reportVoiceEvent("voiceMicrophoneAcquired");
+    await connectVoiceSession();
   } catch (error) {
     cleanupPeer();
-    recoverableColdStartError = coldStart && isNotAllowedError(error);
     const detail = String(error);
-    if (reconnect && isRecoverableRealtimeError(detail)) {
-      scheduleRealtimeReconnect(detail);
-    } else {
-      setMode("degraded");
-      banner.hidden = false;
-      $("#degraded-copy").textContent = detail;
-      response.textContent = detail;
-      await armWakeListener();
-    }
-  } finally {
-    voiceStartInFlight = false;
+    try { await reportVoiceEvent("microphoneAcquireTimeout"); } catch { /* already degraded */ }
+    banner.hidden = false;
+    $("#degraded-copy").textContent = detail;
+    response.textContent = detail;
   }
 }
 
-async function stopDirectVoice() {
+async function connectVoiceSession() {
+  if (!microphoneStream) throw new Error("缺少麦克风音轨");
+  const connection = new RTCPeerConnection();
+  peer = connection;
+  const track = microphoneStream.getAudioTracks()[0];
+  if (!track) throw new Error("未找到麦克风音轨");
+  connection.addTrack(track, microphoneStream);
+  connection.createDataChannel("oai-events");
+  connection.ontrack = (event) => {
+    remoteStream = event.streams[0] ?? new MediaStream([event.track]);
+    voiceAudio.srcObject = remoteStream;
+    attachAnalyser(remoteStream, "remote");
+    void audioContext?.resume();
+    void voiceAudio.play();
+  };
+  connection.onconnectionstatechange = () => {
+    if (connection.connectionState === "failed") {
+      setMode("degraded");
+      response.textContent = "Codex Voice WebRTC 连接失败。";
+    }
+  };
+  const offer = await connection.createOffer();
+  await connection.setLocalDescription(offer);
+  await waitForIceGathering(connection);
+  const sdp = connection.localDescription?.sdp;
+  if (!sdp) throw new Error("WebRTC 未生成 SDP offer");
+  const info = await invoke<DirectVoice>("start_codex_voice", {
+    request: {
+      cwd: workspace.id,
+      threadId: savedThreadId(),
+      permissionMode,
+      speechStyle,
+      codexPath: codexBinary || null,
+      sdp,
+      voice: "cove",
+    },
+  });
+  updateVoiceInfo(info);
+}
+
+async function reconnectVoice() {
+  if (!microphoneStream || peer) return;
   try {
-    const info = await invoke<DirectVoice>("stop_codex_voice");
-    updateVoiceInfo(info);
-  } finally {
+    await connectVoiceSession();
+  } catch (error) {
     cleanupPeer();
+    const detail = String(error);
+    try { await reportVoiceEvent("voiceConnectTimeout"); } catch { /* already degraded */ }
+    banner.hidden = false;
+    $("#degraded-copy").textContent = detail;
+    response.textContent = detail;
+  }
+}
+
+function watchTrackEnded(stream: MediaStream) {
+  const tracks = stream.getAudioTracks();
+  const check = () => {
+    if (allTracksEnded) return;
+    if (tracks.length > 0 && tracks.every((track) => track.readyState === "ended")) {
+      allTracksEnded = true;
+      maybeReportAllTracksEnded();
+    }
+  };
+  for (const track of tracks) track.addEventListener("ended", check);
+}
+
+function maybeReportAllTracksEnded() {
+  if (!allTracksEnded || state.voice?.state !== "wakeRearming") return;
+  allTracksEnded = false;
+  void reportVoiceEvent("allTracksEnded").catch(() => {});
+}
+
+function stopLocalTracks() {
+  if (microphoneStream) {
+    for (const track of microphoneStream.getTracks()) track.stop();
   }
 }
 
 if (currentWindow) {
   await listen<Message>("codex-event", ({ payload }) => void handle(payload));
+  await listen<VoiceStateInfo>("jarvis-voice-state", ({ payload }) => applyVoiceState(payload));
+  await listen("jarvis-voice-may-acquire-microphone", () => { /* 状态机已切到 voiceAcquiringMicrophone，由 applyVoiceState 驱动 */ });
   await listen<RuntimeStateInfo>("jarvis-runtime-state", ({ payload }) => {
     if (payload.state === "ready") {
       banner.hidden = true;
@@ -969,11 +938,6 @@ if (currentWindow) {
         ? "Waiting to re-arm"
         : payload.authorization;
     if (payload.ready) {
-      if (recoverableColdStartError && state.mode === "degraded") {
-        recoverableColdStartError = false;
-        banner.hidden = true;
-        setMode("ready");
-      }
       if (state.mode === "ready") {
         response.textContent = "我在。直接说“嗨 Jarvis”。";
         setWorker("orchestrator", "Wake word armed");
@@ -991,7 +955,7 @@ if (currentWindow) {
       return;
     }
     banner.hidden = true;
-    void startDirectVoice({ coldStart: payload.cold === true });
+    // 麦克风交接由后端状态机驱动（voiceAcquiringMicrophone -> voiceMayAcquire）。
   });
 }
 $("#command-form").addEventListener("submit", async (event) => {
@@ -1026,8 +990,9 @@ $("#command-form").addEventListener("submit", async (event) => {
   await invoke("send_text", { text });
 });
 mic.addEventListener("click", () => {
-  if (state.directVoice?.voiceActive || peer) void stopDirectVoice();
-  else void startDirectVoice();
+  state.manualStop = false;
+  if (state.voice?.micOwner === "voice" || peer) void reportVoiceEvent("stopRequested");
+  else void reportVoiceEvent("wakeDetected");
 });
 $("#stop").addEventListener("click", async () => {
   triggerCharacterAction("error", 700);
@@ -1035,11 +1000,8 @@ $("#stop").addEventListener("click", async () => {
   state.agentWorking = false;
   for (const role of ["orchestrator", "developer", "researcher", "reviewer"]) setWorker(role, "Interrupted", false);
   if (!currentWindow) return;
-  if (state.directVoice?.voiceActive || peer) {
-    try { await stopDirectVoice(); } catch { /* task interruption still continues */ }
-  }
-  await invoke("stop_all");
-  await armWakeListener();
+  try { await reportVoiceEvent("stopRequested"); } catch { /* no runtime to stop */ }
+  stopLocalTracks();
 });
 function syncPermissionControls() {
   const input = document.querySelector<HTMLInputElement>(
@@ -1074,9 +1036,8 @@ $("#new-thread").addEventListener("click", async () => {
   settings.close();
   response.textContent = "正在结束当前任务并创建新的 Codex thread…";
   try {
-    if (state.directVoice?.voiceActive || peer) {
-      try { await stopDirectVoice(); } catch { cleanupPeer(); }
-    }
+    try { await reportVoiceEvent("workspaceSwitchRequested"); } catch { /* no voice */ }
+    stopLocalTracks();
     try { await invoke("stop_all"); } catch { /* no active runtime */ }
     await invoke("shutdown");
     const freshSession = await invoke<Session>("start_jarvis", {
@@ -1160,9 +1121,8 @@ $("#save-settings").addEventListener("click", async () => {
   }
   if (runtimeChanged) {
     state.manualStop = true;
-    if (state.directVoice?.voiceActive || peer) {
-      try { await stopDirectVoice(); } catch { cleanupPeer(); }
-    }
+    try { await reportVoiceEvent("workspaceSwitchRequested"); } catch { /* no voice */ }
+    stopLocalTracks();
     try { await invoke("stop_all"); } catch { /* no active runtime */ }
     await invoke("shutdown");
     permissionMode = nextPermission;
@@ -1182,7 +1142,7 @@ $("#save-settings").addEventListener("click", async () => {
     if (resumeVoiceAfterSave) {
       response.textContent += " 正在使用新的语音风格重连 Voice…";
       await sleep(250);
-      await startDirectVoice();
+      await reportVoiceEvent("wakeDetected");
     } else {
       response.textContent += " 下一次任务将在所选目录续接 Codex thread。";
       await armWakeListener();
@@ -1235,6 +1195,7 @@ if (currentWindow) {
     }
     await armWakeListener();
     updateVoiceInfo(await invoke<DirectVoice>("direct_voice_status"));
+    applyVoiceState(await invoke<VoiceStateInfo>("voice_state"));
     if (await invoke<boolean>("consume_cold_wake")) {
       transcript.textContent = "“嗨，Jarvis”";
     }

@@ -15,7 +15,9 @@
 //! - rotate_plan() keeps the newest logs within max_bytes and deletes oldest
 //!   first; the newest file is never deleted.
 
-use jarvis_codex_lib::{classify, redact, rotate_plan, LogFileInfo, ProbeResult, VerdictLevel};
+use jarvis_codex_lib::{
+    classify, mic_consent_denied, redact, rotate_plan, LogFileInfo, ProbeResult, VerdictLevel,
+};
 
 #[test]
 fn ok_is_green_with_a_stable_code() {
@@ -359,4 +361,32 @@ fn verdict_serializes_with_zh_fields() {
     assert!(value["suggestedActionZh"]
         .as_str()
         .is_some_and(|s| !s.is_empty()));
+}
+
+#[test]
+fn mic_consent_denied_detects_master_switch() {
+    assert!(mic_consent_denied(Some("Deny"), Some("Allow"), &[]));
+    assert!(!mic_consent_denied(Some("Allow"), Some("Allow"), &[]));
+    assert!(!mic_consent_denied(None, Some("Allow"), &[]));
+}
+
+#[test]
+fn mic_consent_denied_detects_desktop_apps_switch() {
+    assert!(mic_consent_denied(Some("Allow"), Some("deny"), &[]));
+    assert!(mic_consent_denied(Some("Allow"), Some("Deny"), &[]));
+}
+
+#[test]
+fn mic_consent_denied_detects_jarvis_specific_entry() {
+    let entries = [(
+        "C:#Users#u#AppData#Local#Jarvis Codex#wake-helper#JarvisWakeListener.exe",
+        Some("Deny"),
+    )];
+    assert!(mic_consent_denied(Some("Allow"), Some("Allow"), &entries));
+}
+
+#[test]
+fn mic_consent_denied_ignores_other_apps_entry() {
+    let entries = [("C:#Program Files#Other#app.exe", Some("Deny"))];
+    assert!(!mic_consent_denied(Some("Allow"), Some("Allow"), &entries));
 }

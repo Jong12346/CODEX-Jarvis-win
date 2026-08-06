@@ -104,6 +104,24 @@ pub fn classify(result: ProbeResult) -> Verdict {
     }
 }
 
+/// Windows microphone privacy decision: denied when the master
+/// switch, the desktop-apps switch, or a Jarvis-specific entry is Deny.
+/// Pure function: inputs are injected by the integration layer so the
+/// decision is testable on any platform.
+#[doc(hidden)]
+pub fn mic_consent_denied(
+    master: Option<&str>,
+    non_packaged: Option<&str>,
+    jarvis_entries: &[(&str, Option<&str>)],
+) -> bool {
+    let denied = |value: Option<&str>| value.is_some_and(|text| text.eq_ignore_ascii_case("Deny"));
+    denied(master)
+        || denied(non_packaged)
+        || jarvis_entries
+            .iter()
+            .any(|(name, value)| name.to_ascii_lowercase().contains("jarvis") && denied(*value))
+}
+
 /// 脱敏：登录令牌、代理口令、敏感环境变量值、绝对路径中的用户名段。
 #[doc(hidden)]
 pub fn redact(text: &str) -> String {

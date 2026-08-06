@@ -33,7 +33,8 @@ mod workspace;
 
 #[doc(hidden)]
 pub use diagnostics::{
-    classify, redact, rotate_plan, LogFileInfo, ProbeResult, RotatePlan, Verdict, VerdictLevel,
+    classify, mic_consent_denied, redact, rotate_plan, LogFileInfo, ProbeResult, RotatePlan,
+    Verdict, VerdictLevel,
 };
 use process::SystemProcessSpawner;
 #[doc(hidden)]
@@ -1518,9 +1519,38 @@ fn probe_microphone() -> ProbeResult {
     ) else {
         return ProbeResult::Ok;
     };
-    match key.get_value::<String, _>("Value") {
-        Ok(value) if value.eq_ignore_ascii_case("Deny") => ProbeResult::MicDenied,
-        _ => ProbeResult::Ok,
+    let master = key.get_value::<String, _>("Value").ok();
+    let non_packaged_key = key.open_subkey("NonPackaged");
+    let non_packaged = non_packaged_key
+        .as_ref()
+        .ok()
+        .and_then(|sub| sub.get_value::<String, _>("Value").ok());
+    let jarvis_entries: Vec<(String, Option<String>)> = non_packaged_key
+        .map(|sub| {
+            sub.enum_keys()
+                .filter_map(Result::ok)
+                .map(|name| {
+                    let value = sub
+                        .open_subkey(&name)
+                        .ok()
+                        .and_then(|app| app.get_value::<String, _>("Value").ok());
+                    (name, value)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let denied = mic_consent_denied(
+        master.as_deref(),
+        non_packaged.as_deref(),
+        &jarvis_entries
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_deref()))
+            .collect::<Vec<_>>(),
+    );
+    if denied {
+        ProbeResult::MicDenied
+    } else {
+        ProbeResult::Ok
     }
 }
 

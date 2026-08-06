@@ -50,6 +50,15 @@ type DiagnosticItem = {
     suggestedActionZh: string;
   };
 };
+type SettingsDto = {
+  present: boolean;
+  workspace?: string;
+  threadId?: string;
+  permissionMode: string;
+  speechStyle: string;
+  codexBinary?: string;
+  autostart: boolean;
+};
 type WakeStatus = {
   enabled: boolean;
   ready: boolean;
@@ -70,6 +79,7 @@ type SpeechStyle = "mandarin" | "shaanxi";
 
 const state = {
   voice: null as VoiceStateInfo | null,
+  settings: null as SettingsDto | null,
   mode: "booting" as Mode,
   session: null as Session | null,
   directVoice: null as DirectVoice | null,
@@ -116,9 +126,9 @@ function permissionLabel(mode: PermissionMode): string {
 let permissionMode = storedPermissionMode();
 let speechStyle = storedSpeechStyle();
 let codexBinary = localStorage.getItem(CODEX_BINARY_KEY) ?? "";
-const savedThreadId = () => workspace.threadKey
-  ? localStorage.getItem(workspace.threadKey)
-  : null;
+const savedThreadId = () =>
+  state.settings?.threadId
+  ?? (workspace.threadKey ? localStorage.getItem(workspace.threadKey) : null);
 
 function migrateWorkspaceThreadKeys(info: WorkspaceInfo): string | null {
   const markerKey = `${THREAD_MIGRATION_MARKER_PREFIX}${info.id}`;
@@ -907,6 +917,31 @@ function stopLocalTracks() {
   }
 }
 
+async function loadBackendSettings(): Promise<SettingsDto | null> {
+  try {
+    let settings = await invoke<SettingsDto>("get_settings");
+    if (!settings.present) {
+      const snapshot: Record<string, string> = {};
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (key?.startsWith("jarvis.threadId:")) {
+          snapshot[key] = localStorage.getItem(key) ?? "";
+        }
+      }
+      snapshot["jarvis.workspace"] = localStorage.getItem(WORKSPACE_KEY) ?? "";
+      snapshot["jarvis.permissionMode"] = localStorage.getItem(PERMISSION_KEY) ?? "";
+      snapshot["jarvis.speechStyle"] = localStorage.getItem(SPEECH_STYLE_KEY) ?? "";
+      snapshot["jarvis.codexBinary"] = localStorage.getItem(CODEX_BINARY_KEY) ?? "";
+      await invoke<SettingsDto>("import_legacy_settings", { snapshot });
+      settings = await invoke<SettingsDto>("get_settings");
+    }
+    state.settings = settings;
+    return settings;
+  } catch {
+    return null;
+  }
+}
+
 if (currentWindow) {
   await listen<Message>("codex-event", ({ payload }) => void handle(payload));
   await listen<VoiceStateInfo>("jarvis-voice-state", ({ payload }) => applyVoiceState(payload));
@@ -1080,6 +1115,17 @@ $("#new-thread").addEventListener("click", async () => {
     });
     state.session = freshSession;
     state.directVoice = null;
+    try {
+      state.settings = await invoke<SettingsDto>("save_settings", {
+        request: {
+          workspace: workspace.id,
+          threadId: freshSession.threadId,
+          permissionMode,
+          speechStyle,
+          codexPath: codexBinary || null,
+        },
+      });
+    } catch { /* localStorage 仍作缓存 */ }
     localStorage.setItem(workspace.threadKey, freshSession.threadId);
     $("#thread-id").textContent = freshSession.threadId;
     $("#workspace").textContent = freshSession.cwd;
@@ -1163,6 +1209,17 @@ $("#save-settings").addEventListener("click", async () => {
     codexBinary = nextCodexBinary;
     if (codexBinary) localStorage.setItem(CODEX_BINARY_KEY, codexBinary);
     else localStorage.removeItem(CODEX_BINARY_KEY);
+    try {
+      state.settings = await invoke<SettingsDto>("save_settings", {
+        request: {
+          workspace: nextWorkspace.id,
+          threadId: savedThreadId() ?? undefined,
+          permissionMode: nextPermission,
+          speechStyle: nextSpeechStyle,
+          codexPath: nextCodexBinary || null,
+        },
+      });
+    } catch { /* localStorage 仍作缓存 */ }
     state.session = null;
     state.directVoice = null;
     syncPermissionControls();
@@ -1188,9 +1245,21 @@ for (const [selector, approved] of [["#approve", true], ["#deny", false]] as con
 if (currentWindow) {
   try {
     const storedWorkspace = localStorage.getItem(WORKSPACE_KEY);
-    workspace = storedWorkspace
-      ? await invoke<WorkspaceInfo>("validate_workspace", { cwd: storedWorkspace })
-      : await invoke<WorkspaceInfo>("default_workspace");
+    const backendSettings = await loadBackendSettings();
+    workspace = backendSettings?.workspace
+      ? await invoke<WorkspaceInfo>("validate_workspace", { cwd: backendSettings.workspace })
+      : storedWorkspace
+        ? await invoke<WorkspaceInfo>("validate_workspace", { cwd: storedWorkspace })
+        : await invoke<WorkspaceInfo>("default_workspace");
+    if (backendSettings) {
+      if (backendSettings.permissionMode === "safe" || backendSettings.permissionMode === "auto" || backendSettings.permissionMode === "full") {
+        permissionMode = backendSettings.permissionMode;
+      }
+      if (backendSettings.speechStyle === "mandarin" || backendSettings.speechStyle === "shaanxi") {
+        speechStyle = backendSettings.speechStyle;
+      }
+      if (backendSettings.codexBinary) codexBinary = backendSettings.codexBinary;
+    }
     const permissionResolution = await invoke<PermissionResolution>("resolve_permission_mode", {
       cwd: workspace.id,
       mode: permissionMode,

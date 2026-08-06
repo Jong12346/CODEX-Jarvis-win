@@ -1777,6 +1777,189 @@ async fn copy_diagnostics(app: AppHandle, state: State<'_, AppState>) -> Result<
     Ok(redact(&lines.join("\n")))
 }
 
+fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法定位应用数据目录：{error}"))?;
+    fs::create_dir_all(&directory).map_err(|error| format!("无法创建应用数据目录：{error}"))?;
+    Ok(directory.join("settings.json"))
+}
+
+fn save_settings_file(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    let path = settings_path(app)?;
+    let bytes =
+        serde_json::to_vec_pretty(settings).map_err(|error| format!("设置序列化失败：{error}"))?;
+    let plan = write_plan(path.to_str().ok_or("设置路径无效")?, &bytes);
+    fs::write(&plan.temp_path, &bytes).map_err(|error| format!("写入设置临时文件失败：{error}"))?;
+    let _ = fs::remove_file(&plan.backup_path);
+    let _ = fs::rename(&plan.final_path, &plan.backup_path);
+    fs::rename(&plan.temp_path, &plan.final_path)
+        .map_err(|error| format!("原子替换设置文件失败：{error}"))
+}
+
+fn load_settings(app: &AppHandle) -> Settings {
+    let Ok(path) = settings_path(app) else {
+        return Settings::default();
+    };
+    let read = |candidate: &PathBuf| fs::read_to_string(candidate).ok();
+    if let Some(content) = read(&path) {
+        if let Ok(settings) = migrate(&content, 0) {
+            return settings;
+        }
+        // 主文件损坏：回退备份。
+        let backup = path.with_extension("json.bak");
+        if let Some(content) = read(&backup) {
+            if let Ok(settings) = migrate(&content, 0) {
+                return settings;
+            }
+        }
+        return Settings::default();
+    }
+    let backup = path.with_extension("json.bak");
+    if let Some(content) = read(&backup) {
+        if let Ok(settings) = migrate(&content, 0) {
+            return settings;
+        }
+    }
+    Settings::default()
+}
+
+/// 启动时加载并迁移；迁移或备份回退后立即原子回写。返回是否启用自启动。
+fn initialize_settings(app: &AppHandle) -> bool {
+    let settings = load_settings(app);
+    let _ = save_settings_file(app, &settings);
+    settings.autostart
+}
+
+fn settings_dto(app: &AppHandle) -> SettingsDto {
+    let settings = load_settings(app);
+    let home = home_workspace_id().ok();
+    let workspace = settings
+        .workspace
+        .as_deref()
+        .and_then(|value| validated_workspace(value).ok())
+        .map(|resolved| resolved.id);
+    let permission_mode = match &home {
+        Some(home) => resolve_stored_permission(
+            &settings.permission_mode,
+            workspace.as_ref(),
+            home,
+            current_platform(),
+        ),
+        None => "safe".to_owned(),
+    };
+    let thread_id = workspace
+        .as_ref()
+        .and_then(|workspace| {
+            settings
+                .threads
+                .iter()
+                .find(|mapping| mapping.workspace == workspace.as_str())
+        })
+        .map(|mapping| mapping.thread_id.clone());
+    SettingsDto {
+        present: true,
+        workspace: workspace.map(|workspace| workspace.as_str().to_owned()),
+        thread_id,
+        permission_mode,
+        speech_style: settings.speech_style,
+        codex_binary: settings.codex_binary,
+        autostart: settings.autostart,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsDto {
+    present: bool,
+    workspace: Option<String>,
+    thread_id: Option<String>,
+    permission_mode: String,
+    speech_style: String,
+    codex_binary: Option<String>,
+    autostart: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveSettingsRequest {
+    workspace: String,
+    thread_id: Option<String>,
+    permission_mode: String,
+    speech_style: String,
+    codex_path: Option<String>,
+    autostart: Option<bool>,
+}
+
+#[tauri::command]
+async fn get_settings(app: AppHandle) -> Result<SettingsDto, String> {
+    Ok(settings_dto(&app))
+}
+
+#[tauri::command]
+async fn save_settings(
+    app: AppHandle,
+    request: SaveSettingsRequest,
+) -> Result<SettingsDto, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let workspace = validated_workspace(&request.workspace)?;
+    let mut settings = load_settings(&app);
+    settings.workspace = Some(workspace.id.as_str().to_owned());
+    if let Some(thread_id) = request
+        .thread_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        upsert_thread(&mut settings.threads, workspace.id.as_str(), thread_id);
+    }
+    settings.permission_mode = request.permission_mode;
+    settings.speech_style = request.speech_style;
+    settings.codex_binary = request.codex_path.filter(|value| !value.is_empty());
+    if let Some(autostart) = request.autostart {
+        settings.autostart = autostart;
+    }
+    save_settings_file(&app, &settings)?;
+    let state = app.state::<AppState>();
+    if let Some(autostart) = request.autostart {
+        let autolaunch = app.autolaunch();
+        if autostart {
+            let _ = autolaunch.enable();
+        } else {
+            let _ = autolaunch.disable();
+        }
+    }
+    let _ = &state;
+    Ok(settings_dto(&app))
+}
+
+#[tauri::command]
+async fn import_legacy_settings(app: AppHandle, snapshot: Value) -> Result<SettingsDto, String> {
+    let mut settings = load_settings(&app);
+    let imported = import_legacy(&snapshot, current_platform(), &SystemPathProbe);
+    if let Some(workspace) = imported.workspace {
+        settings.workspace = Some(workspace.clone());
+    }
+    for mapping in imported.threads {
+        upsert_thread(
+            &mut settings.threads,
+            &mapping.workspace,
+            &mapping.thread_id,
+        );
+    }
+    if snapshot.get("jarvis.permissionMode").is_some() {
+        settings.permission_mode = imported.permission_mode;
+    }
+    if snapshot.get("jarvis.speechStyle").is_some() {
+        settings.speech_style = imported.speech_style;
+    }
+    if snapshot.get("jarvis.codexBinary").is_some() {
+        settings.codex_binary = imported.codex_binary;
+    }
+    save_settings_file(&app, &settings)?;
+    Ok(settings_dto(&app))
+}
+
 #[tauri::command]
 async fn direct_voice_status(state: State<'_, AppState>) -> Result<DirectVoiceInfo, String> {
     Ok(direct_voice_info(&state).await)
@@ -2780,6 +2963,9 @@ pub fn run() {
             report_voice_event,
             run_diagnostics,
             copy_diagnostics,
+            get_settings,
+            save_settings,
+            import_legacy_settings,
             consume_cold_wake,
             runtime_state,
             default_workspace,
@@ -2802,7 +2988,12 @@ pub fn run() {
                 MacosLauncher::LaunchAgent,
                 Some(vec!["--background"]),
             ))?;
-            let _ = app.autolaunch().enable();
+            let autostart = initialize_settings(app.handle());
+            if autostart {
+                let _ = app.autolaunch().enable();
+            } else {
+                let _ = app.autolaunch().disable();
+            }
             apply_log_rotation(app.handle());
             if let Some(window) = app.get_webview_window("main") {
                 if background_start {

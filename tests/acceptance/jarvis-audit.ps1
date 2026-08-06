@@ -26,7 +26,10 @@ function Write-Report {
 
 function Find-Latest {
     param([string]$FileName)
-    $candidates = Get-ChildItem -Path $env:APPDATA -Recurse -File -Filter $FileName -ErrorAction SilentlyContinue
+    $candidates = @(
+        Get-ChildItem -Path $env:APPDATA -Recurse -File -Filter $FileName -ErrorAction SilentlyContinue
+        Get-ChildItem -Path $env:LOCALAPPDATA -Recurse -File -Filter $FileName -ErrorAction SilentlyContinue
+    )
     # 日志文件名本身是 Jarvis 专属；settings.json 则只认路径含 jarvis 的，
     # 绝不回退到其他应用的配置。
     if ($FileName -eq 'settings.json') {
@@ -109,7 +112,7 @@ if ($SettingsPath -and (Test-Path $SettingsPath)) {
 if (-not $SkipProcess) {
     Write-Report '--- 相关进程树 ---'
     $all = Get-CimInstance Win32_Process
-    $roots = $all | Where-Object { $_.Name -match '^codex(\.exe)?$|^JarvisWakeListener' }
+    $roots = $all | Where-Object { $_.Name -match '^codex\.exe$|^JarvisWakeListener\.exe$|^jarvis-codex\.exe$' }
     if ($roots) {
         foreach ($root in $roots) {
             Write-Report ('root pid=' + $root.ProcessId + '  name=' + $root.Name + '  ppid=' + $root.ParentProcessId)

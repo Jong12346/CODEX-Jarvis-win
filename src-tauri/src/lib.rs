@@ -23,6 +23,7 @@ use tokio::{
 
 mod process;
 mod runtime_state;
+mod stop_sequence;
 mod voice_state;
 mod workspace;
 
@@ -34,6 +35,11 @@ pub use runtime_state::{
     request_rejection, restart_backoff, runtime_state_transition, should_watcher_restart,
     stability_reset_interval, RequestRejection, RuntimeEvent, RuntimeGeneration, RuntimeState,
     MAX_AUTO_RESTARTS,
+};
+#[doc(hidden)]
+pub use stop_sequence::{
+    advance_stop_step, next_stop_action, on_stop_triggered, termination_targets, JobTreeSnapshot,
+    StopAction, StopStep, STOP_GRACE,
 };
 #[doc(hidden)]
 pub use voice_state::{

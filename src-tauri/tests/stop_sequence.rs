@@ -194,7 +194,8 @@ fn the_full_sequence_with_kill_is_ordered() {
                     alive = false;
                 }
             }
-            StopAction::Rebuild | StopAction::Done => break,
+            StopAction::Rebuild => {}
+            StopAction::Done => break,
         }
     }
     assert_eq!(
@@ -225,7 +226,8 @@ fn the_self_exit_sequence_never_kills() {
         match action {
             StopAction::SendRealtimeStop | StopAction::SendTurnInterrupt => {}
             StopAction::WaitGrace => alive = false,
-            StopAction::Rebuild | StopAction::Done => break,
+            StopAction::Rebuild => {}
+            StopAction::Done => break,
             StopAction::KillJobTree => panic!("self-exit path must never kill"),
         }
     }

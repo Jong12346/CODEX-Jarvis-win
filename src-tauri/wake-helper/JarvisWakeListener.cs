@@ -10,16 +10,12 @@ using System.Threading;
 
 internal static class JarvisWakeListener
 {
-    private static readonly string[] WakePhrases =
+            private static readonly string[] WakePhrases =
     {
         "hey jarvis",
         "hi jarvis",
         "jarvis",
-        "嗨 jarvis",
-        "嘿 jarvis",
-        "嗨 贾维斯",
-        "嘿 贾维斯",
-        "贾维斯",
+        "嗨 Jarvis",
     };
 
     private static readonly ManualResetEvent Finished = new ManualResetEvent(false);

@@ -4,6 +4,8 @@
 
 > 如果命令报错，请先查看 [Windows 常见问题排查](WINDOWS_TROUBLESHOOTING.md)。
 > 已完成与仍需人工确认的项目记录在 [Windows 移植验证状态](WINDOWS_STATUS.md)。
+> 后续可靠性、唤醒、STOP、诊断和发布优化统一按照
+> [Windows 最终优化方案](WINDOWS_OPTIMIZATION_PLAN.md) 执行。
 
 ## 选择部署方式
 

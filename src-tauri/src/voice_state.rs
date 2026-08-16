@@ -83,6 +83,9 @@ pub enum VoiceEvent {
     AllTracksEnded,
     WakeError,
     RealtimeError,
+    /// Explicit UI fallback when the local wake engine is unavailable. This
+    /// never runs automatically and is valid only after entering Degraded.
+    ManualVoiceRequested,
     Timeout {
         stage: TimeoutStage,
     },
@@ -111,6 +114,7 @@ impl VoiceEvent {
             Self::AllTracksEnded => "allTracksEnded",
             Self::WakeError => "wakeError",
             Self::RealtimeError => "realtimeError",
+            Self::ManualVoiceRequested => "manualVoiceRequested",
             Self::Timeout { stage } => match stage {
                 TimeoutStage::WakeArm => "timeout.wakeArm",
                 TimeoutStage::MicrophoneRelease => "timeout.microphoneRelease",
@@ -136,6 +140,7 @@ impl VoiceEvent {
             "voiceStopped" => Some(Self::VoiceStopped),
             "wakeError" => Some(Self::WakeError),
             "realtimeError" => Some(Self::RealtimeError),
+            "manualVoiceRequested" => Some(Self::ManualVoiceRequested),
             "timeout.wakeArm" => Some(Self::Timeout {
                 stage: TimeoutStage::WakeArm,
             }),
@@ -235,6 +240,9 @@ pub fn voice_state_transition(state: VoiceState, event: VoiceEvent) -> VoiceStat
 
         (_, VoiceEvent::WakeError | VoiceEvent::RealtimeError | VoiceEvent::Timeout { .. }) => {
             VoiceState::Degraded
+        }
+        (VoiceState::Degraded, VoiceEvent::ManualVoiceRequested) => {
+            VoiceState::VoiceAcquiringMicrophone
         }
         (VoiceState::Degraded, VoiceEvent::RetryRequested) => VoiceState::Booting,
 

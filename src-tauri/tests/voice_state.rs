@@ -494,6 +494,19 @@ fn degraded_recovers_only_through_retry() {
 }
 
 #[test]
+fn explicit_manual_voice_bypasses_only_a_degraded_wake_engine() {
+    assert_eq!(
+        voice_state_transition(VoiceState::Degraded, VoiceEvent::ManualVoiceRequested),
+        VoiceState::VoiceAcquiringMicrophone
+    );
+    assert_eq!(
+        voice_state_transition(VoiceState::WakeReady, VoiceEvent::ManualVoiceRequested),
+        VoiceState::WakeReady,
+        "healthy standby must keep the normal release-before-acquire path"
+    );
+}
+
+#[test]
 fn boot_to_arm_only_via_boot_completed() {
     for event in [
         VoiceEvent::WakeArmed,

@@ -175,6 +175,8 @@ let userTranscriptBuffer = "";
 let assistantTranscriptBuffer = "";
 let agentMessageBuffer = "";
 let allTracksEnded = false;
+let voiceAcquireInFlight = false;
+let voiceConnectInFlight = false;
 const voiceAudio = new Audio();
 voiceAudio.autoplay = true;
 const previewParams = new URLSearchParams(window.location.search);
@@ -761,7 +763,10 @@ const sleep = (milliseconds: number) =>
   new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
 
 function reportVoiceEvent(event: string): Promise<VoiceStateInfo> {
-  return invoke<VoiceStateInfo>("report_voice_event", { event }).then(applyVoiceState);
+  // The backend emits jarvis-voice-state for every successful transition.
+  // Applying the command result here as well would run state side effects twice
+  // (notably microphone acquisition and Codex runtime startup).
+  return invoke<VoiceStateInfo>("report_voice_event", { event });
 }
 
 function voiceCopy(stateName: VoiceStateName): { mode: Mode; title: string } {
@@ -825,7 +830,8 @@ function applyVoiceState(info: VoiceStateInfo): VoiceStateInfo {
 }
 
 async function acquireVoiceMicrophone() {
-  if (peer || state.voice?.micOwner === "voice") return;
+  if (voiceAcquireInFlight || peer || state.voice?.micOwner === "voice") return;
+  voiceAcquireInFlight = true;
   allTracksEnded = false;
   try {
     const authorization = await invoke<string>("request_microphone_permission");
@@ -847,6 +853,8 @@ async function acquireVoiceMicrophone() {
     $("#degraded-copy").textContent = detail;
     response.textContent = detail;
     return;
+  } finally {
+    voiceAcquireInFlight = false;
   }
   try {
     await reportVoiceEvent("voiceMicrophoneAcquired");
@@ -866,6 +874,9 @@ async function acquireVoiceMicrophone() {
 }
 
 async function connectVoiceSession() {
+  if (voiceConnectInFlight) return;
+  voiceConnectInFlight = true;
+  try {
   if (!microphoneStream) throw new Error("缺少麦克风音轨");
   const connection = new RTCPeerConnection();
   peer = connection;
@@ -903,6 +914,9 @@ async function connectVoiceSession() {
     },
   });
   updateVoiceInfo(info);
+  } finally {
+    voiceConnectInFlight = false;
+  }
 }
 
 async function reconnectVoice() {
@@ -1125,7 +1139,9 @@ $("#command-form").addEventListener("submit", async (event) => {
 mic.addEventListener("click", () => {
   state.manualStop = false;
   if (state.voice?.state === "degraded") {
-    void reportVoiceEvent("retryRequested");
+    const wakeUnavailable = state.voice.degraded?.errorKind === "wakeError"
+      || state.voice.degraded?.errorKind === "wakeArmTimeout";
+    void reportVoiceEvent(wakeUnavailable ? "manualVoiceRequested" : "retryRequested");
   } else if (state.voice?.micOwner === "voice" || peer) {
     void reportVoiceEvent("stopRequested");
   } else {

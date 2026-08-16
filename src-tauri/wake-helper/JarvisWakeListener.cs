@@ -94,9 +94,12 @@ internal static class JarvisWakeListener
             }
 
             bool releaseRequested = false;
-            using (var recognizer = new SpeechRecognitionEngine(recognizerInfo.Id))
+            using (var recognizer = CreateRecognizer(recognizerInfo))
             {
-                LoadWakeGrammar(recognizer, recognizerInfo.Culture);
+                CultureInfo activeCulture = recognizer.RecognizerInfo == null
+                    ? recognizerInfo.Culture
+                    : recognizer.RecognizerInfo.Culture;
+                LoadWakeGrammar(recognizer, activeCulture);
                 recognizer.SpeechRecognized += OnSpeechRecognized;
                 recognizer.RecognizeCompleted += delegate { Finished.Set(); };
                 Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs eventArgs)
@@ -184,6 +187,29 @@ internal static class JarvisWakeListener
             ?? installed.FirstOrDefault(item => item.Culture.Name.StartsWith("zh", StringComparison.OrdinalIgnoreCase))
             ?? installed.FirstOrDefault(item => item.Culture.Name.StartsWith("en", StringComparison.OrdinalIgnoreCase))
             ?? installed.FirstOrDefault();
+    }
+
+    private static SpeechRecognitionEngine CreateRecognizer(RecognizerInfo preferred)
+    {
+        try
+        {
+            return new SpeechRecognitionEngine(preferred.Id);
+        }
+        catch
+        {
+            try
+            {
+                return new SpeechRecognitionEngine(preferred.Culture);
+            }
+            catch
+            {
+                // Some Windows installations enumerate a recognizer whose
+                // registry id cannot be bound (HRESULT 0x80050022), while the
+                // system default engine remains usable. Prefer a working local
+                // engine over disabling wake and Voice entirely.
+                return new SpeechRecognitionEngine();
+            }
+        }
     }
 
     private static void OnSpeechRecognized(object sender, SpeechRecognizedEventArgs eventArgs)

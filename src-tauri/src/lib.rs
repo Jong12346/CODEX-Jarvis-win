@@ -2162,6 +2162,15 @@ fn load_settings(app: &AppHandle) -> Settings {
     Settings::default()
 }
 
+/// A saved thread can outlive the rollout data owned by the current Codex
+/// installation. That condition is permanent for the saved id, so retrying it
+/// would keep both text and Voice startup in a degraded loop.
+pub fn missing_thread_rollout(error: &str) -> bool {
+    error
+        .to_ascii_lowercase()
+        .contains("no rollout found for thread id")
+}
+
 /// 启动时加载并迁移；迁移或备份回退后立即原子回写。返回是否启用自启动。
 fn initialize_settings(app: &AppHandle) -> bool {
     let settings = load_settings(app);
@@ -3030,35 +3039,69 @@ async fn launch_runtime(
             profile.instructions
         )
     });
-    let thread_setup: Result<String, String> = async {
-        let started = if let Some(thread_id) = config
+    let thread_setup: Result<(String, Option<String>), String> = async {
+        let (started, replaced_thread_id) = if let Some(thread_id) = config
             .resume_thread_id
             .as_deref()
             .filter(|value| !value.trim().is_empty())
         {
             let mut resume_options = thread_options.clone();
             resume_options["threadId"] = Value::String(thread_id.to_owned());
-            runtime
-                .request("thread/resume", resume_options)
-                .await
-                .map_err(|error| format!("无法续接原 Codex thread；原 thread id 已保留：{error}"))?
+            match runtime.request("thread/resume", resume_options).await {
+                Ok(started) => (started, None),
+                Err(error) if missing_thread_rollout(&error) => {
+                    let mut start_options = thread_options.clone();
+                    start_options["ephemeral"] = Value::Bool(false);
+                    (
+                        runtime.request("thread/start", start_options).await?,
+                        Some(thread_id.to_owned()),
+                    )
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "无法续接原 Codex thread；原 thread id 已保留：{error}"
+                    ));
+                }
+            }
         } else {
             let mut start_options = thread_options;
             start_options["ephemeral"] = Value::Bool(false);
-            runtime.request("thread/start", start_options).await?
+            (runtime.request("thread/start", start_options).await?, None)
         };
         let thread_id = started
             .pointer("/thread/id")
             .and_then(Value::as_str)
             .ok_or("Codex 未返回 threadId")?
             .to_owned();
-        Ok(thread_id)
+        Ok((thread_id, replaced_thread_id))
     }
     .await;
-    let thread_id = match thread_setup {
-        Ok(thread_id) => thread_id,
+    let (thread_id, replaced_thread_id) = match thread_setup {
+        Ok(thread_setup) => thread_setup,
         Err(error) => return Err(fail_runtime_startup(&app, &state, &runtime, error).await),
     };
+    let mut settings = load_settings(&app);
+    settings.workspace = Some(config.workspace.as_str().to_owned());
+    upsert_thread(&mut settings.threads, config.workspace.as_str(), &thread_id);
+    if let Err(error) = save_settings_file(&app, &settings) {
+        return Err(fail_runtime_startup(
+            &app,
+            &state,
+            &runtime,
+            format!("无法保存新的 Codex thread：{error}"),
+        )
+        .await);
+    }
+    if let Some(previous_thread_id) = replaced_thread_id {
+        let _ = app.emit(
+            "jarvis-thread-recovered",
+            json!({
+                "previousThreadId": previous_thread_id,
+                "threadId": thread_id,
+                "reason": "missingRollout"
+            }),
+        );
+    }
     *runtime.thread_id.write().await = Some(thread_id.clone());
     if let Some(desired) = state.desired_runtime.lock().await.as_mut() {
         desired.resume_thread_id = Some(thread_id);

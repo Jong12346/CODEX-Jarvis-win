@@ -612,6 +612,7 @@ function updateVoiceInfo(info: DirectVoice) {
   // 麦克风持有由 jarvis-voice-state 驱动，这里不再推断连接状态。
   if (info.threadId) {
     state.session = { threadId: info.threadId, cwd: workspace.id };
+    if (state.settings) state.settings.threadId = info.threadId;
     $("#thread-id").textContent = info.threadId;
     localStorage.setItem(workspace.threadKey, info.threadId);
   }

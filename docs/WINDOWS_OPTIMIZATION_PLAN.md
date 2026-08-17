@@ -52,6 +52,7 @@
 - STOP 主要依赖 Codex RPC 和 runtime 子进程持有关系，尚未用 Windows Job Object 对整棵任务进程树提供操作系统级兜底。
 - 设置和 workspace/thread 映射主要保存在前端，需要迁移到后端的版本化持久化存储。
 - TypeScript 和 Rust 主文件体积较大，状态逻辑需要模块化。
+- 语音与 Agent 执行层绑定 Codex 专有链路（OpenAI 账号、网络与登录态），国内用户不可达，语音模块无通用性。
 - 未完成发布代码签名、自动更新和真实登录重启后的全套回归。
 
 ## 4. 目标架构
@@ -315,7 +316,46 @@ npm run build:windows
 - 发布说明包含 Codex realtime 实验接口限制、模型许可证、系统要求和人工验收记录。
 - 自动更新必须支持签名校验和失败回滚，不静默替换未签名二进制。
 
-## 11. LOOP 实施规则
+## 11. 阶段七（扩展）：语音与 Agent Provider 可插拔（国人友好版）
+
+### 11.1 背景与目标
+
+现有语音链路与 Agent 执行层绑定 OpenAI 专有设施：前端 WebRTC 直连 `codex app-server` realtime、后端 JSON-RPC thread 体系、认证复用本机 Codex 登录。国内用户缺少账号、支付与网络条件，该链路不可达，语音模块不具备通用性。
+
+目标（借鉴 DSH/Cordis“一切皆是插件”思想，裁剪为 Rust trait + 注册表 + 配置驱动的静态装配）：
+
+1. 语音与 Agent 各收敛为一个对外契约；Codex 从唯一后端降级为其中一个适配器。
+2. 新增国内厂商适配器：优先豆包 Realtime（火山方舟，WebSocket + PCM16，国内直连）；其次 Qwen-Omni（百炼）；管线降级模式（ASR→LLM→TTS）作为任意文本 API 的兜底。
+3. 提供国内构建变体（`tauri.cn.conf.json`：产品名、标识符、默认 provider），不复制代码库。
+4. 核心资源管理（唤醒、麦克风所有权、STOP、Job Object、诊断、持久化）保持厂商无关，不因 provider 切换改变行为。
+
+### 11.2 架构决策：对外一层，对内三层
+
+- 对外唯一契约：`VoiceProvider` trait（`connect` / `interrupt` / `send_text` / `stop` + 统一事件）。核心（状态机、STOP、UI）只依赖该契约，接口风险最小。
+- 对内私有模块按三层组织：`transport`（WebRTC / WebSocket / stdio）、`protocol`（各家事件语义映射）、`codec`（PCM16 / Opus）。复用先发生在实现内部，不先建公共 trait。
+- 三层提升为公共 trait 的触发条件（三次法则）：同一层被两个以上厂商原样复用，且切法经实践验证（预期豆包落地后 `transport` 与 `codec` 层先触发）。
+- 首版不做动态加载（代码签名、诊断确定性、供应链审计成本高）；采用编译期注册 + settings 配置驱动。
+- capability flags（`realtime` / `toolEvents` / `interruptable` / `audioFormat`）由适配器声明，UI 与核心据此渲染，不猜测厂商协议。
+
+### 11.3 实施顺序
+
+1. `docs/cn-friendly/PROVIDER_DESIGN.md` 设计文档与契约（事件枚举、capability flags、错误分类、合规清单）先评审后写码。
+2. 契约测试先行：仿 §5.4 方法暂存 `tests/contract/`，注入假件驱动，不依赖真实麦克风或网络。
+3. Codex 适配器搬迁：把 `main.ts` 的 WebRTC 与 `lib.rs` 的 realtime 调用收敛进 `src-tauri/src/voice/providers/codex/`，行为零变化；157 项契约测试与现有门禁全绿。
+4. 豆包 Realtime PoC 适配器（WebSocket + PCM16，官方 Realtime API），契约测试绿。
+5. settings 增加 provider 配置段（schema v3 迁移），capability flags 驱动 UI；Key 只存本机、不进日志（沿用现有脱敏要求）。
+6. 国内构建变体 `tauri.cn.conf.json` + 发布文档（合规清单：BYOK、AI 合成内容标识、不做中转服务）。
+7. 管线降级模式（ASR→LLM→TTS）视需要排期，不作为本阶段门禁。
+
+### 11.4 验收标准
+
+- 步骤 3 完成后：Codex 链路行为与搬迁前一致，`npm run check` 全绿，`git status` 只含应有改动。
+- 步骤 4 完成后：豆包适配器契约测试绿；实机执行 §5.3 的 20 次“唤醒→Voice→STOP→重布防”循环，麦克风交接、STOP、诊断与 Codex 模式同标准。
+- settings schema 升级无损迁移；切换 provider 后 STOP、麦克风所有权、错误分类均正常。
+- 合规核对：不内置任何厂商 Key；日志无凭据；若公开分发，标注 AI 合成内容并完成所需合规事项。
+- 留给独立复审 / 用户实机：真实语音质量、打断体验、各厂商错误恢复路径。
+
+## 12. LOOP 实施规则
 
 每轮只处理一个可验证问题：
 
@@ -345,20 +385,21 @@ npm run build:windows
 
 只在以下外部阻塞下暂停：代码签名证书、许可证选择、大型模型的授权或来源、系统级管理员权限、Codex 当前版本不存在所需实验接口、真实音频必须由用户听取确认，或继续操作会影响工作区外数据。
 
-## 12. 当前实施顺序与进度
+## 13. 当前实施顺序与进度
 
 | 顺序 | 工作项 | 状态 | 完成证据 |
 |---|---|---|---|
 | 0 | Windows 可运行基线、NSIS、Codex Voice、同 thread、现有 STOP | 已完成 | `WINDOWS_STATUS.md` |
 | P0 | 工作区标识规范化、runtime 死亡监控与恢复、安全权限默认（含 Job Object `KILL_ON_JOB_CLOSE` 基础与结构化 runtime 日志 `jarvis-runtime.jsonl`） | 已完成 | 提交 68b41d9 / 319ca1c / 392e84e / 161751f；独立复审通过；45 项 Rust 契约测试 + fmt + clippy `-D warnings` 门禁绿 |
-| 1 | 语音/麦克风确定性状态机（当前阶段，执行细则见 §5.4） | 进行中 | `voice_state.rs` 契约测试并入门禁 + 20 次实机循环 |
+| 1 | 语音/麦克风确定性状态机（执行细则见 §5.4） | 进行中 | 提交 a7b87bc/b181d27/e212ec0：157 项 Rust 契约测试 + fmt + clippy `-D warnings` + 17 项 Node 测试门禁绿；20 次实机循环待验收 |
 | 2 | Windows Job Object 与 STOP 进程树兜底 | 待开始 | 子进程/孙进程清理测试 |
 | 3 | 一键诊断和脱敏结构化日志 | 待开始 | 故障分类测试 + UI 验证 |
 | 4 | 现有唤醒增强和离线关键词引擎评估/接入 | 待开始 | 中英文实机命中记录 |
 | 5 | 后端持久化、首次启动向导、托盘和快捷键 | 待开始 | 升级迁移和恢复测试 |
 | 6 | 模块化、安装回归、签名和发布收尾 | 待开始 | Windows 发布验收报告 |
+| 7 | 语音与 Agent Provider 可插拔（国人友好版，设计见 §11 与 `docs/cn-friendly/PROVIDER_DESIGN.md`） | 设计阶段 | Provider 契约测试 + Codex 适配器零回归 + 豆包 Realtime 实机验收 |
 
-## 13. 最终完成定义
+## 14. 最终完成定义
 
 只有同时满足以下条件，才将本方案标记为完成：
 
@@ -373,4 +414,5 @@ npm run build:windows
 - 安装、覆盖升级、卸载、登录启动和真实 Voice 完成实机验收。
 - 发布文件不包含个人绝对路径、凭据、私密信息或未说明的第三方模型。
 - 最终报告列出改动、测试证据、人工验证、已知限制、签名状态和产物位置。
+- 若面向国内分发：语音与 Agent 的 Provider 契约落地（对外一层、对内三层），Codex 适配器搬迁零回归，至少一个国内厂商适配器通过契约测试与实机验收。
 

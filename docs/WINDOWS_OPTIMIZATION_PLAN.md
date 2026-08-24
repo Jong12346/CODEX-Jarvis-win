@@ -397,7 +397,7 @@ npm run build:windows
 | 4 | 现有唤醒增强和离线关键词引擎评估/接入 | 待开始 | 中英文实机命中记录 |
 | 5 | 后端持久化、首次启动向导、托盘和快捷键 | 待开始 | 升级迁移和恢复测试 |
 | 6 | 模块化、安装回归、签名和发布收尾 | 待开始 | Windows 发布验收报告 |
-| 7 | 语音与 Agent Provider 可插拔（国人友好版，设计见 §11 与 `docs/cn-friendly/PROVIDER_DESIGN.md`） | 设计阶段 | Provider 契约测试 + Codex 适配器零回归 + 豆包 Realtime 实机验收 |
+| 7 | 语音与 Agent Provider 可插拔（国人友好版，设计见 §11 与 `docs/cn-friendly/PROVIDER_DESIGN.md`） | 契约测试暂存待评审（§11.3 步骤 2） | `tests/contract/voice_provider.rs` 17 项契约经影子实现自证 17/17 绿（修复 2 处契约缺陷 + 冻结稳定错误码）+ 符号就位后入 `src-tauri/tests/` + Codex 适配器零回归 + 豆包 Realtime 实机验收 |
 
 ## 14. 最终完成定义
 

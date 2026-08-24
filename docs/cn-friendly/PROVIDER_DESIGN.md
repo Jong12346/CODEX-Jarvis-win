@@ -115,6 +115,19 @@ pub struct ProviderError {
 - 一体化模式（Codex、豆包带工具）下两者联动；分离模式（豆包语音 + DeepSeek 大脑）下经桥接层回流：语音 transcript → Agent 输入，Agent 工具进度 → 语音播报。
 - 待实机验证（决定 PoC 第一步）：豆包 Realtime 会话内工具调用是否可用；分离模式的桥接体验是否可接受。
 
+### 5.3 契约新增纯函数（tests/contract/voice_provider.rs 已冻结）
+
+契约测试为使断言可执行，在 trait 之外新增四个 `#[doc(hidden)] pub` 纯函数（沿用 P0 契约暴露约定），实现时必须按此签名提供：
+
+| 符号 | 职责 | 契约冻结的行为 |
+|---|---|---|
+| `map_vendor_event(&str, &Value) -> Result<UnifiedVoiceEvent, ProviderError>` | OpenAI 兼容流派的 JSON 事件 → 统一枚举；未知/畸形事件 → Protocol 错误 | 7 种已知事件映射；`protocol.unknownEvent`、`protocol.audioOnJsonPath` 等稳定错误码；audio 不得走 JSON 路径 |
+| `control_surface_for(&ProviderCapabilities) -> ControlSurface` | 能力位 → UI 控制面（纯函数，前端唯一渲染依据） | showInterrupt = realtime && interruptable；showTaskTools = toolEvents；管线模式必带说明文案 |
+| `validate_audio_frame(&[u8]) -> bool` | 下行音频帧不变量：非空且字节对齐 PCM16 | 奇数长度与空帧非法 |
+| `provider_switch_prelude(VoiceState) -> SwitchPlan` | 切换 provider 的有序关闭前缀 | 活跃态=停止→确认→实例化；待机/Degraded=直接实例化；交接中=拒绝；计划永不含 thread 键 |
+
+契约自证：`tests/contract/voice_provider.rs` 已通过 .tmp 影子实现编译运行 17/17 绿（不依赖真实麦克风/网络）。
+
 ## 6. settings schema v3（草案）
 
 `settings_store.rs` 现为 `SETTINGS_SCHEMA_VERSION: u32 = 2`。升级要点：

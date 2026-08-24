@@ -8,6 +8,6 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test voice-events.test.ts doubao-codec.test.ts doubao-map.test.ts doubao-session.test.ts voice-client.test.ts"
+    "test": "node --test voice-events.test.ts doubao-codec.test.ts doubao-map.test.ts doubao-session.test.ts voice-client.test.ts relay.test.ts"
   }
 }

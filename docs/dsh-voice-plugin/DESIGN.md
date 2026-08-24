@@ -50,7 +50,7 @@ Jarvis 从独立 Tauri app 演进为 DSH 生态插件，分两层：
 
 1. **唤醒词直接上**：纯前端 PoC 用 sherpa-onnx-wasm 浏览器内关键词识别（对齐方案 §8 阶段四方向）；System.Speech C# sidecar 作为后续宿主侧备选。
 2. **迁移现有粒子界面**：把 Jarvis 现有 main.ts 的粒子/装甲视觉逻辑迁移进客户端插件，不重做极简风。
-3. **先纯前端最小 PoC**：语音链路 getUserMedia→豆包 WebSocket 全在浏览器侧完成，不先建宿主 ctx.voice seam；链路验证后再提升为正式 seam。
+3. **先纯前端最小 PoC（含本地 relay）**：语音链路 getUserMedia→本地 relay→豆包 WebSocket；因浏览器 WebSocket 无法设自定义头、豆包鉴权靠头，故必须经本地 relay，不先建宿主 ctx.voice seam；链路验证后再提升为正式 seam。
 
 ## 7. 豆包 Realtime 协议核实（修正此前假设）
 
@@ -58,6 +58,7 @@ Jarvis 从独立 Tauri app 演进为 DSH 生态插件，分两层：
 - 豆包另有一套 OpenAI 兼容 Realtime API（Ark 平台，文本/多模态）——与语音 PoC 无关，待需要时再核实。
 - **修正**：设计文档 docs/cn-friendly §4.2「国内 realtime API 高度同构、协议层差异小」的假设对豆包**语音**不成立；语音 adapter 的 protocol/codec 层是定制活，不是薄映射。
 - 会话内工具调用（function call）能力：S2S 语音 API 是否支持仍需实机验证（官方文档与 demo 未在 README 层明示）。
+- **浏览器约束**：豆包鉴权走 WebSocket 自定义头，而浏览器 WebSocket API 无法设置自定义头，故浏览器不能直连豆包；官方 demo 用 FastAPI 服务端中转。本地 relay 承载鉴权头（`voice-contract/relay.ts` 已实现转发核心，4 项测试）。
 
 ## 8. 客户端插件形态（packages/client/*，已核对）
 

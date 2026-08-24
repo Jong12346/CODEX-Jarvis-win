@@ -200,7 +200,7 @@ ws.addEventListener('message', (ev) => {
 
   if (type === 'session.created') {
     log('SUCCESS session.id = ' + (obj.session && obj.session.id))
-    log('[send] 开始流式发送输入音频 (' + Math.round(pcm16.length / 320) + 'ms)...')
+    log('[send] 开始流式发送输入音频 (' + Math.round((pcm16.length / 2 / 16000) * 1000) + 'ms)...')
     void streamAudio()
   } else if (type === 'conversation.item.input_audio_transcription.delta') {
     asrText += obj.delta || ''

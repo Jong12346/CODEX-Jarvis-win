@@ -1,6 +1,6 @@
 # voice-contract — 贾维斯语音插件纯逻辑层
 
-把 Jarvis 演进为 DSH 生态语音插件的「可离线验证」部分：语音 provider 契约 + 豆包 S2S 二进制协议 codec/map/session。零依赖、契约先行、39 项测试全绿。
+把 Jarvis 演进为 DSH 生态语音插件的「可离线验证」部分：语音 provider 契约 + 豆包 S2S 二进制协议 codec/map/session。零依赖、契约先行、45 项测试全绿。
 
 ## 这是什么
 
@@ -16,6 +16,7 @@
 | doubao-codec.ts | 豆包二进制帧编解码：header 位域 + 可选字段 + payload（大端）、事件号常量全表 | 7 |
 | doubao-map.ts | 豆包 ServerEvent → UnifiedVoiceEvent（ASR→transcript、TTS→audioFrame、CHAT→transcript、错误→ProviderError） | 9 |
 | doubao-session.ts | 会话驱动状态机：connecting→starting→active→closed 握手、送音频/文字、有序关闭；socket/emit 全注入可测 | 6 |
+| voice-client.ts | 顶层编排：把会话、麦克风、扬声器、WebSocket 生命周期、握手超时、STOP 串起来；socket/mic/speaker/clock 全注入可测 | 6 |
 
 ## 跑测试
 

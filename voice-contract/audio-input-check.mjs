@@ -186,7 +186,14 @@ ws.addEventListener('open', () => {
       model: '1.2.6.1',
       audio: {
         input: { format: { type: 'pcm', sample_rate: 16000 } },
-        output: { format: { type: 'pcm_s16le', sample_rate: 24000 }, voice: 'zh_female_vv_jupiter_bigtts' },
+        output: { format: { type: 'pcm_s16le', sample_rate: 24000 }, voice: process.env.DOUBAO_VOICE || 'saturn_zh_female_keainvsheng_tob' },
+      },
+      // 官方：输出 PCM 需在 extension.tts.audio_config 配置；speaker 与旧版 StartSessionPayload 一致
+      extension: {
+        tts: {
+          audio_config: { channel: 1, format: 'pcm_s16le', sample_rate: 24000 },
+          speaker: process.env.DOUBAO_VOICE || 'saturn_zh_female_keainvsheng_tob',
+        },
       },
     },
   }))

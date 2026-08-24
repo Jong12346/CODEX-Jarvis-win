@@ -1,6 +1,6 @@
 # voice-contract — 贾维斯语音插件纯逻辑层
 
-把 Jarvis 演进为 DSH 生态语音插件的「可离线验证」部分：语音 provider 契约 + 豆包 S2S 二进制协议 codec/map/session。零依赖、契约先行、56 项测试全绿。
+把 Jarvis 演进为 DSH 生态语音插件的「可离线验证」部分：语音 provider 契约 + 豆包 S2S 二进制协议 codec/map/session。零依赖、契约先行、59 项测试全绿。
 
 ## 这是什么
 
@@ -19,6 +19,7 @@
 | voice-client.ts | 顶层编排：把会话、麦克风、扬声器、WebSocket 生命周期、握手超时、STOP 串起来；socket/mic/speaker/clock 全注入可测 | 6 |
 | relay.ts | 本地 relay 双向转发核心：承载豆包鉴权头，浏览器只连本地（因浏览器 WebSocket 无法设自定义头） | 4 |
 | pcm.ts | 音频格式转换：float32→int16、线性重采样（浏览器麦克风→豆包 24kHz） | 7 |
+| browser-adapters.ts | 浏览器薄胶水：本地 relay WebSocket 工厂、getUserMedia 采集、WebAudio 播放；浏览器行为留实机联调 | 3 |
 
 ## 跑测试
 

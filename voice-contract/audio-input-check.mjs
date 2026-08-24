@@ -6,12 +6,19 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const logFile = fileURLToPath(new URL('../.tmp/audio-input-check.log', import.meta.url))
+try { writeFileSync(logFile, '') } catch { /* 日志清空失败不阻塞 */ }
 function log(msg) {
   console.log(msg)
   try {
     appendFileSync(logFile, String(msg) + '\n')
   } catch { /* ignore */ }
 }
+
+// 任何未捕获异常都写进日志，便于排查（窗口可能被关掉）
+process.on('uncaughtException', (e) => {
+  log('未捕获异常: ' + (e && e.stack ? e.stack : String(e)))
+  process.exit(1)
+})
 
 const key = process.env.DOUBAO_API_KEY
 if (!key) {
@@ -29,7 +36,7 @@ try {
 }
 log('输入音频: ' + inputPath + ' → ' + wav.sampleRate + 'Hz/' + wav.channels + 'ch/' + wav.bits + 'bit，转 16k 单声道...')
 const pcm16 = toMono16kPcm16(wav)
-log('转换后 PCM16 字节数: ' + pcm16.length + '（约 ' + Math.round(pcm16.length / 320) + 'ms @16k）')
+log('转换后 PCM16 字节数: ' + pcm16.length + '（约 ' + Math.round((pcm16.length / 2 / 16000) * 1000) + 'ms @16k）')
 
 // ---------- WAV 读取 ----------
 function readWav(buffer) {
@@ -59,7 +66,7 @@ function readWav(buffer) {
     off += 8 + size + (size % 2)
   }
   if (!fmt || dataOff < 0) throw new Error('WAV 缺少 fmt/data 块')
-  return { ...fmt, dataOff, dataLen }
+  return { ...fmt, dataOff, dataLen, data: buffer }
 }
 
 function toMono16kPcm16(w) {

@@ -1,5 +1,8 @@
 $ErrorActionPreference = "Stop"
 
+# 无论从哪里运行，先切到项目根目录，避免相对路径找不到模块
+Set-Location -Path (Join-Path $PSScriptRoot "..")
+
 Write-Host "=== Doubao Duplex handshake check ===" -ForegroundColor Cyan
 Write-Host "Paste your API Key below (input is hidden, never displayed)." -ForegroundColor Yellow
 $secure = Read-Host "API Key" -AsSecureString

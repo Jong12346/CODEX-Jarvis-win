@@ -3,10 +3,25 @@
 // 用法（PowerShell）:
 //   $env:DOUBAO_API_KEY="你的key"; node voice-contract/handshake-check.mjs
 // 输出 session.created 即链路全通；输出 error 会带错误码与提示。
+// 输出同时写入 .tmp/handshake-check.log（.tmp 已 gitignore，日志不落盘到仓库）。
+
+import { appendFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
+// 日志写到项目根 .tmp（已 gitignore），路径相对本文件解析，与运行目录无关
+const logFile = fileURLToPath(new URL('../.tmp/handshake-check.log', import.meta.url))
+function log(msg) {
+  console.log(msg)
+  try {
+    appendFileSync(logFile, String(msg) + '\n')
+  } catch {
+    /* 日志写失败不影响自检 */
+  }
+}
 
 const key = process.env.DOUBAO_API_KEY
 if (!key) {
-  console.error('缺少 DOUBAO_API_KEY 环境变量。请先设置后再运行。')
+  log('缺少 DOUBAO_API_KEY 环境变量。请先设置后再运行。')
   process.exit(2)
 }
 

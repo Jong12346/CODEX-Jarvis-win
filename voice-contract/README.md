@@ -1,6 +1,6 @@
 # voice-contract — 贾维斯语音插件纯逻辑层
 
-把 Jarvis 演进为 DSH 生态语音插件的「可离线验证」部分：语音 provider 契约 + 豆包 S2S 二进制协议 codec/map/session。零依赖、契约先行、68 项测试全绿。
+把 Jarvis 演进为 DSH 生态语音插件的「可离线验证」部分：语音 provider 契约 + 豆包 S2S 二进制协议 codec/map/session。零依赖、契约先行、69 项测试全绿。
 
 ## 这是什么
 
@@ -20,7 +20,7 @@
 | relay.ts | 本地 relay 双向转发核心：承载豆包鉴权头，浏览器只连本地（因浏览器 WebSocket 无法设自定义头） | 4 |
 | pcm.ts | 音频格式转换：float32→int16、线性重采样（浏览器麦克风→豆包 24kHz） | 7 |
 | browser-adapters.ts | 浏览器薄胶水：本地 relay WebSocket 工厂、getUserMedia 采集、WebAudio 播放；浏览器行为留实机联调 | 3 |
-| doubao-duplex.ts | 新版实时语音对话（Seeduplex/2549778）：JSON 会话 + 事件映射 + 函数调用；单 X-Api-Key 鉴权 | 9 |
+| doubao-duplex.ts | 新版实时语音对话 3.0（Seeduplex/2549778）：JSON 会话 + 事件映射 + 函数调用 + 静音保活 + 优雅关闭；单 X-Api-Key 鉴权 | 10 |
 
 ## 跑测试
 
@@ -37,7 +37,9 @@
 - 帧结构：Header(4B) + 可选字段(error_code/sequence/event_id/connect_id/session_id) + payload_size(4B) + payload；大端。
 - 事件号 >=100 为 session 级；音频走 AUDIO_ONLY_REQUEST + TASK_REQUEST(200) 原始 PCM16（s16le@24kHz）。
 - 载荷字段（取自官方 demo）：ASR_RESPONSE 的 results[].text/is_interim、CHAT_RESPONSE 的 content、DIALOG_COMMON_ERROR 的 message。
-- **结论**：豆包 S2S 事件表不含工具/函数调用事件 → 走「分离模式」：语音转写 → DSH agent 执行 → 文本回流语音；AgentBackend 归 DSH 自身。
+- **结论**：旧版 S2S 事件表不含工具/函数调用 → 分离模式。
+- **新版 duplex（2549778，主路径）**：/api/v3/duplex/realtime/dialogue、WebSocket 文本 JSON、单 X-Api-Key、model 固定 1.2.6.1、输入 16kHz PCM、输出默认 OGG-Opus（要 PCM 在 extension.tts.audio_config 配 24000Hz）、**支持函数调用**（session.tools + call_id 配对回传）、关麦须发 input_audio_mute.commit 保活、优雅关闭须等 session.closed。
+- **结论更新**：新版支持函数调用 → 可走「一体化模式」（语音会话内直接调工具）；AgentBackend 仍归 DSH/上层，按 call_id 执行并回传。
 
 ## 契约语义来源
 

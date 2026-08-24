@@ -1,10 +1,13 @@
 /**
- * 豆包新版实时语音对话（Seeduplex / 2549778）会话 + 事件映射。
- * WebSocket 文本 JSON，单 X-Api-Key 鉴权（relay 侧），支持函数调用。
+ * 豆包新版实时语音对话 3.0（Seeduplex，官方文档 6561/2549778）会话 + 事件映射。
+ * WebSocket 文本 JSON、单 X-Api-Key 鉴权（relay 侧）、支持函数调用。
  *
- * 对比旧版二进制：端点 /api/v3/duplex/realtime/dialogue、事件用字符串 type、
- * 音频 base64 内联、session.tools 支持 function calling → 可走一体化模式。
- * 本模块映射到统一事件（voice-events.ts），上层编排/契约/relay 全复用。
+ * 官方要点（已按权威文档修正，第三方 SDK 文档有出入）：
+ * - session.model 固定 1.2.6.1（全双工版）
+ * - 输出默认 OGG-Opus；要 PCM 需在 extension.tts.audio_config 配置（24000Hz 单声道 16bit 小端）
+ * - 全双工靠上行音频保活：关麦发 input_audio_mute.commit，恢复发 input_audio_unmute.commit
+ * - 优雅关闭：先 session.close 并收到 session.closed 再断 WS，否则触发 ContextCanceled(55000001)
+ * - function calling：call_id 配对回传，并行调用聚合一并回传
  */
 import { ProviderError, type UnifiedVoiceEvent } from './voice-events.ts'
 
@@ -39,12 +42,15 @@ function base64ToBytes(b64: string): Uint8Array {
   return out
 }
 
+export type DuplexState = 'idle' | 'creating' | 'active' | 'closing' | 'closed'
+
 export class DoubaoDuplexSession {
-  state: 'idle' | 'creating' | 'active' | 'closed' = 'idle'
+  state: DuplexState = 'idle'
   sessionId: string | undefined
   private socket: TextSocket | null = null
   private readonly config: DuplexConfig
   private readonly emit: (events: UnifiedVoiceEvent[]) => void
+  private eventSeq = 0
 
   constructor(config: DuplexConfig, emit: (events: UnifiedVoiceEvent[]) => void) {
     this.config = config
@@ -59,12 +65,18 @@ export class DoubaoDuplexSession {
 
   private buildSession(): Record<string, unknown> {
     const session: Record<string, unknown> = {
-      model: this.config.model ?? '1.2.6.0',
+      model: this.config.model ?? '1.2.6.1',
       audio: {
         input: { format: { type: 'pcm', sample_rate: this.config.inputSampleRate ?? 16000 } },
         output: {
           format: { type: 'pcm_s16le', sample_rate: this.config.outputSampleRate ?? 24000 },
           voice: this.config.voice ?? '',
+        },
+      },
+      // 官方：输出 PCM 需在 extension.tts.audio_config 配置（默认 OGG-Opus）
+      extension: {
+        tts: {
+          audio_config: { channel: 1, format: 'pcm_s16le', sample_rate: 24000 },
         },
       },
     }
@@ -74,7 +86,8 @@ export class DoubaoDuplexSession {
   }
 
   private send(obj: Record<string, unknown>): void {
-    this.socket?.send(JSON.stringify(obj))
+    this.eventSeq += 1
+    this.socket?.send(JSON.stringify({ event_id: 'ev-' + this.eventSeq, ...obj }))
   }
 
   onMessage(text: string): void {
@@ -93,6 +106,10 @@ export class DoubaoDuplexSession {
         this.state = 'active'
         return
       }
+      case 'session.closed':
+        this.socket?.close()
+        this.state = 'closed'
+        return
       case 'conversation.item.input_audio_transcription.delta':
         this.emit([{ type: 'transcriptDelta', role: 'user', text: str(ev.delta) }])
         return
@@ -109,7 +126,7 @@ export class DoubaoDuplexSession {
         this.emit([{ type: 'turnStarted' }])
         return
       case 'response.output_audio.delta': {
-        const audio = str(ev.audio)
+        const audio = str(ev.audio ?? ev.delta)
         if (audio) this.emit([{ type: 'audioFrame', samples: Array.from(base64ToBytes(audio)) }])
         return
       }
@@ -123,14 +140,16 @@ export class DoubaoDuplexSession {
         }
         return
       }
-      case 'error':
-        this.emit([
-          {
-            type: 'error',
-            error: new ProviderError('doubao.duplexError', 'protocol', false, str(ev.message ?? ev.error)),
-          },
-        ])
+      case 'error': {
+        const message = str(ev.message ?? ev.error)
+        const code = str(ev.code)
+        const advice =
+          code === '55000001' || message.includes('ContextCanceled')
+            ? '未正常发送 session.close 即断开，请先发 session.close 再关闭连接'
+            : message
+        this.emit([{ type: 'error', error: new ProviderError('doubao.duplexError', 'protocol', false, advice) }])
         return
+      }
       default:
         // session.updated / input_audio_buffer.committed / conversation.item.* / response.done / usage 内部簿记
         return
@@ -145,6 +164,18 @@ export class DoubaoDuplexSession {
   commitAudio(): void {
     if (this.state !== 'active') return
     this.send({ type: 'input_audio_buffer.commit' })
+  }
+
+  /** 关闭麦克风后发送，避免全双工因收不到上行音频超时。 */
+  mute(): void {
+    if (this.state !== 'active') return
+    this.send({ type: 'input_audio_mute.commit' })
+  }
+
+  /** 恢复麦克风后发送。 */
+  unmute(): void {
+    if (this.state !== 'active') return
+    this.send({ type: 'input_audio_unmute.commit' })
   }
 
   sendText(text: string): void {
@@ -165,11 +196,14 @@ export class DoubaoDuplexSession {
     })
   }
 
+  /** 优雅关闭：先发 session.close，收到 session.closed 后由 onMessage 关闭 socket。 */
   stop(): void {
-    if (this.socket) {
-      if (this.state === 'active') this.send({ type: 'session.close' })
-      this.socket.close()
+    if (this.socket && (this.state === 'active' || this.state === 'creating')) {
+      this.state = 'closing'
+      this.send({ type: 'session.close' })
+    } else {
+      this.socket?.close()
+      this.state = 'closed'
     }
-    this.state = 'closed'
   }
 }

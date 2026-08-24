@@ -87,7 +87,7 @@ interface BrowserAudioBuffer {
 export function browserMicSource(
   getStream: () => Promise<unknown>,
   getAudioContext: () => unknown,
-  targetSampleRate = 24000,
+  targetSampleRate = 16000,
 ): AudioSource {
   let stream: BrowserMediaStream | null = null
   let ac: BrowserAudioContext | null = null

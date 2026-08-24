@@ -12,7 +12,7 @@ class FakeTextSocket implements TextSocket {
 
 function setup() {
   const events: UnifiedVoiceEvent[] = []
-  const session = new DoubaoDuplexSession({ model: '1.2.6.0', voice: 'zh_female_vv_jupiter_bigtts' }, (e) => events.push(...e))
+  const session = new DoubaoDuplexSession({ voice: 'zh_female_vv_jupiter_bigtts' }, (e) => events.push(...e))
   const sock = new FakeTextSocket()
   return { session, sock, events }
 }
@@ -27,10 +27,12 @@ test('session create carries model, audio config and voice', () => {
   assert.equal(s.session.state, 'creating')
   const msg = JSON.parse(s.sock.sent[0])
   assert.equal(msg.type, 'session.create')
-  assert.equal(msg.session.model, '1.2.6.0')
+  assert.equal(msg.session.model, '1.2.6.1')
   assert.deepEqual(msg.session.audio.input.format, { type: 'pcm', sample_rate: 16000 })
   assert.deepEqual(msg.session.audio.output.format, { type: 'pcm_s16le', sample_rate: 24000 })
   assert.equal(msg.session.audio.output.voice, 'zh_female_vv_jupiter_bigtts')
+  // 官方：输出 PCM 需在 extension.tts.audio_config 配置
+  assert.deepEqual(msg.session.extension.tts.audio_config, { channel: 1, format: 'pcm_s16le', sample_rate: 24000 })
 })
 
 test('session.created activates and records session id', () => {
@@ -116,12 +118,25 @@ test('function call output is returned via conversation.item.create role=tool', 
   assert.equal(msg.items[0].content[0].text, '{"temperature":26}')
 })
 
-test('stop sends session.close and closes the socket', () => {
+test('stop is graceful: session.close first, socket closes on session.closed ack', () => {
   const s = setup()
   s.session.onSocketOpen(s.sock)
   s.session.onMessage(serverEvent('session.created', { session: { id: 'x' } }))
   s.session.stop()
+  assert.equal(s.session.state, 'closing')
+  assert.equal(s.sock.closed, false, 'socket must not close before session.closed ack')
+  assert.equal(JSON.parse(s.sock.sent[1]).type, 'session.close')
+  s.session.onMessage(serverEvent('session.closed'))
   assert.equal(s.session.state, 'closed')
   assert.equal(s.sock.closed, true)
-  assert.equal(JSON.parse(s.sock.sent[1]).type, 'session.close')
+})
+
+test('mute and unmute keep the full-duplex uplink alive', () => {
+  const s = setup()
+  s.session.onSocketOpen(s.sock)
+  s.session.onMessage(serverEvent('session.created', { session: { id: 'x' } }))
+  s.session.mute()
+  s.session.unmute()
+  assert.equal(JSON.parse(s.sock.sent[1]).type, 'input_audio_mute.commit')
+  assert.equal(JSON.parse(s.sock.sent[2]).type, 'input_audio_unmute.commit')
 })

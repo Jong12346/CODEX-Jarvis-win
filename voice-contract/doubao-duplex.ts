@@ -25,6 +25,30 @@ export interface DuplexConfig {
   tools?: unknown[]
 }
 
+/** Shared by the adapter and the live check scripts to avoid payload drift. */
+export function buildDuplexSession(config: DuplexConfig = {}): Record<string, unknown> {
+  const voice = config.voice ?? 'saturn_zh_female_keainvsheng_tob'
+  const session: Record<string, unknown> = {
+    model: config.model ?? '1.2.6.1',
+    audio: {
+      input: { format: { type: 'pcm', sample_rate: config.inputSampleRate ?? 16000 } },
+      output: {
+        format: { type: 'pcm_s16le', sample_rate: config.outputSampleRate ?? 24000 },
+        voice,
+      },
+    },
+    extension: {
+      tts: {
+        audio_config: { channel: 1, format: 'pcm_s16le', sample_rate: config.outputSampleRate ?? 24000 },
+        speaker: voice,
+      },
+    },
+  }
+  if (config.instructions) session.instructions = config.instructions
+  if (config.tools) session.tools = config.tools
+  return session
+}
+
 function str(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
@@ -60,29 +84,7 @@ export class DoubaoDuplexSession {
   onSocketOpen(socket: TextSocket): void {
     this.socket = socket
     this.state = 'creating'
-    this.send({ type: 'session.create', session: this.buildSession() })
-  }
-
-  private buildSession(): Record<string, unknown> {
-    const session: Record<string, unknown> = {
-      model: this.config.model ?? '1.2.6.1',
-      audio: {
-        input: { format: { type: 'pcm', sample_rate: this.config.inputSampleRate ?? 16000 } },
-        output: {
-          format: { type: 'pcm_s16le', sample_rate: this.config.outputSampleRate ?? 24000 },
-          voice: this.config.voice ?? '',
-        },
-      },
-      // 官方：输出 PCM 需在 extension.tts.audio_config 配置（默认 OGG-Opus）
-      extension: {
-        tts: {
-          audio_config: { channel: 1, format: 'pcm_s16le', sample_rate: 24000 },
-        },
-      },
-    }
-    if (this.config.instructions) session.instructions = this.config.instructions
-    if (this.config.tools) session.tools = this.config.tools
-    return session
+    this.send({ type: 'session.create', session: buildDuplexSession(this.config) })
   }
 
   private send(obj: Record<string, unknown>): void {
@@ -180,6 +182,7 @@ export class DoubaoDuplexSession {
 
   sendText(text: string): void {
     if (this.state !== 'active') return
+    // 豆包将该事件定义为打招呼/指定文本播报；它直接产出 TTS，不保证 Chat 文本事件。
     this.send({ type: 'speech_text_buffer.commit', text })
   }
 

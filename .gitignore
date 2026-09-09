@@ -1,5 +1,6 @@
 node_modules/
 dist/
+/voice-contract/lib/
 /.codex-publish-work-*/
 src-tauri/target/
 src-tauri/gen/

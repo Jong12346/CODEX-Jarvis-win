@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#061116" />
+    <title>Jarvis · 豆包实时语音联调</title>
+    <link rel="stylesheet" href="/browser-poc.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <span class="eyebrow">JARVIS VOICE LAB</span>
+        <h1>豆包实时语音联调</h1>
+        <p>浏览器麦克风 → 本地 relay → Doubao Duplex → 24kHz PCM 回放</p>
+      </header>
+
+      <section id="voice-visual" class="voice-visual" data-mode="idle" aria-label="Jarvis 语音状态视觉">
+        <canvas id="voice-particles" aria-hidden="true"></canvas>
+        <div class="visual-ring ring-outer" aria-hidden="true"></div>
+        <div class="visual-ring ring-inner" aria-hidden="true"></div>
+        <div class="character-aura" aria-hidden="true"></div>
+        <img id="jarvis-character" src="/assets/jarvis-character-v2.png" alt="" />
+        <div class="visual-caption"><span>VOICE CORE</span><strong id="visual-state">STANDBY</strong></div>
+      </section>
+
+      <section class="status-card" aria-live="polite">
+        <span id="status-dot" class="dot"></span>
+        <div>
+          <small>连接状态</small>
+          <strong id="status">尚未连接</strong>
+        </div>
+      </section>
+
+      <section class="wake-card" aria-live="polite">
+        <div>
+          <small>本地离线唤醒</small>
+          <strong id="wake-status">正在检查 sherpa-onnx 资源…</strong>
+        </div>
+        <button id="wake-toggle" disabled>启用唤醒</button>
+      </section>
+
+      <label class="field">
+        <span>本地 relay</span>
+        <input id="relay-url" value="ws://127.0.0.1:8787/ws" spellcheck="false" />
+      </label>
+
+      <div class="actions">
+        <button id="start" class="primary">开始对话</button>
+        <button id="mute" disabled>静音</button>
+        <button id="stop" disabled>停止</button>
+      </div>
+
+      <div class="speech-test">
+        <input id="speech-text" value="你好，我是 Jarvis。" aria-label="指定文本播报内容" />
+        <button id="speak" disabled>播放测试语</button>
+      </div>
+
+      <section class="transcript">
+        <div class="transcript-title">
+          <span>实时记录</span>
+          <button id="clear" class="link">清空</button>
+        </div>
+        <div id="log" class="log"><p class="hint">先运行 relay，再点击“开始对话”并允许麦克风。</p></div>
+        <p id="partial" class="partial"></p>
+      </section>
+    </main>
+    <script type="module" src="/browser-poc.ts"></script>
+  </body>
+</html>

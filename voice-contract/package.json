@@ -1,13 +1,39 @@
 {
   "name": "@jarvis/voice-contract",
   "version": "0.1.0",
-  "description": "Jarvis voice plugin pure-logic layer: provider contract + Doubao S2S codec/map/session (zero-dependency, contract-first)",
+  "description": "Jarvis voice plugin contract and local Doubao WebSocket relay",
   "type": "module",
   "private": true,
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./browser": {
+      "types": "./lib/browser.d.ts",
+      "default": "./lib/browser.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.js.map",
+    "lib/**/*.d.ts",
+    "lib/**/*.d.ts.map",
+    "relay-server.mjs",
+    "README.md"
+  ],
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test voice-events.test.ts doubao-codec.test.ts doubao-map.test.ts doubao-session.test.ts voice-client.test.ts relay.test.ts pcm.test.ts browser-adapters.test.ts doubao-duplex.test.ts"
+    "build": "tsc -p tsconfig.build.json",
+    "test": "node --test voice-events.test.ts doubao-codec.test.ts doubao-map.test.ts doubao-session.test.ts voice-client.test.ts relay.test.ts relay-server.test.mjs pcm.test.ts wav-audio.test.mjs browser-adapters.test.ts doubao-duplex.test.ts doubao-duplex-client.test.ts wake-coordinator.test.ts sherpa-kws-browser.test.ts",
+    "relay": "node relay-server.mjs"
+  },
+  "dependencies": {
+    "ws": "8.21.3"
   }
 }

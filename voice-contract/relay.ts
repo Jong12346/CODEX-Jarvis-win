@@ -1,19 +1,22 @@
 /**
  * 豆包语音本地 relay（双向转发核心）。
  *
- * 为什么需要 relay：豆包 S2S 用 WebSocket 头鉴权（X-Api-App-ID / X-Api-Access-Key 等），
+ * 为什么需要 relay：豆包旧 S2S 和新版 Duplex 都使用 WebSocket 鉴权头，
  * 而浏览器 WebSocket API 无法设置自定义头，所以浏览器不能直连豆包。
- * 官方 demo 也是用服务端中转。本 relay 承载鉴权头，浏览器只连本地 relay（无鉴权头）。
+ * 本 relay 承载对应协议的鉴权头，浏览器只连本地 relay（无鉴权头）。
  *
- * 本模块是纯转发核心（注入两端 socket），真实 ws 服务端接线留到 adapter 层。
+ * 本模块是纯转发核心（注入两端 socket），同时保留文本帧和二进制帧类型。
+ * 真实 ws 服务端接线见 relay-server.mjs。
  */
+export type RelayData = string | Uint8Array
+
 export interface RelayHandlers {
-  onMessage(data: Uint8Array): void
+  onMessage(data: RelayData): void
   onClose(): void
 }
 
 export interface RelayEnd {
-  send(data: Uint8Array): void
+  send(data: RelayData): void
   close(): void
   setHandlers(handlers: RelayHandlers): void
 }

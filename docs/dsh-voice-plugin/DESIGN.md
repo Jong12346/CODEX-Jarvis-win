@@ -1,6 +1,6 @@
 # Jarvis → DSH 语音插件：阶段一设计
 
-- 状态：设计草案 v0.1（待评审）
+- 状态：DSH UI 插件首版 v0.5（Host relay、浏览器控制与最终转写 Agent 投递已组装，Agent 结果语音回流及离线唤醒待完成）
 - 上游依据：docs/cn-friendly/PROVIDER_DESIGN.md 的 D1–D4 决策，载体从 Rust trait 平移为 DSH 插件接口
 - 目标：把 Jarvis 演进为 DSH 生态的语音插件，记忆与 provider 解耦，语音交互优先
 
@@ -39,7 +39,7 @@ Jarvis 从独立 Tauri app 演进为 DSH 生态插件，分两层：
 2. **doubao realtime adapter**：WebSocket + PCM16，官方 Realtime API；先实机验证"会话内工具调用"再定一体化/分离模式。
 3. **客户端 UI 插件**：getUserMedia 采集 + 音频播放 + 唤醒/麦克风按钮 + 事件渲染。
 4. **豆包 PoC 跑通**：唤醒→豆包→对话→STOP。
-5. **AgentBackend 衔接**：语音 transcript → `ctx.agents`；工具进度回流语音。
+5. **AgentBackend 衔接**：最终用户 transcript 已通过现有 scope 会话入口进入同一 Agent；Agent 回复与工具进度回流语音待完成。
 6. **记忆可移植验收**：换 provider，记忆/会话/thread 不丢（`ctx.storage` 已保障，验证即可）。
 
 ## 5. 与旧 Rust 契约的关系
@@ -54,15 +54,15 @@ Jarvis 从独立 Tauri app 演进为 DSH 生态插件，分两层：
 
 ## 7. 豆包 Realtime 协议核实（修正此前假设）
 
-- 豆包**语音**（S2S 语音大模型）走**自定义二进制 WebSocket 协议**：`wss://openspeech.bytedance.com/api/v3/realtime/dialogue`，鉴权用 Volcengine APP_ID + AccessKey，resource_id `volc.speech.dialog`，帧格式为自定义 binary（audio frame / event frame），**不是** OpenAI 兼容 JSON。
-- 豆包另有一套 OpenAI 兼容 Realtime API（Ark 平台，文本/多模态）——与语音 PoC 无关，待需要时再核实。
-- **修正**：设计文档 docs/cn-friendly §4.2「国内 realtime API 高度同构、协议层差异小」的假设对豆包**语音**不成立；语音 adapter 的 protocol/codec 层是定制活，不是薄映射。
-- 会话内工具调用（function call）能力：S2S 语音 API 是否支持仍需实机验证（官方文档与 demo 未在 README 层明示）。
-- **浏览器约束**：豆包鉴权走 WebSocket 自定义头，而浏览器 WebSocket API 无法设置自定义头，故浏览器不能直连豆包；官方 demo 用 FastAPI 服务端中转。本地 relay 承载鉴权头（`voice-contract/relay.ts` 已实现转发核心，4 项测试）。
+- 豆包语音存在两代协议。旧 S2S 端点 `wss://openspeech.bytedance.com/api/v3/realtime/dialogue` 使用自定义二进制帧和多鉴权头，兼容实现继续保留。
+- 当前 PoC 采用实时语音模型 3.0（Seeduplex）的 Duplex 端点 `wss://openspeech.bytedance.com/api/v3/duplex/realtime/dialogue`：文本 JSON WebSocket、单 `X-Api-Key`、PCM16/16kHz 输入和 PCM16/24kHz 输出。
+- Duplex 适配器已覆盖函数调用事件与工具结果回传，真实工具调用仍待在线验收；WAV 输入的 ASR→回复文本→TTS 回路已经实跑成功。
+- **修正**：协议与 codec 仍是厂商定制层，provider 只能共享统一事件和生命周期语义，不能假设各家 Realtime API 高度同构。
+- **浏览器约束**：浏览器 WebSocket API 无法设置鉴权头。本地 relay 已实现为可启动服务，只监听回环地址、限制本地 Origin，并在服务端向上游注入 Key；真实 WebSocket 集成测试覆盖文本与二进制帧转发。
 
 ## 8. 客户端插件形态（packages/client/*，已核对）
 
 - 每个客户端插件一个包：node 半边 `src/index.ts`（`apply`，可为空，仅为出现在 host cordis.yml）、浏览器半边 `src/client/index.ts`、package.json 声明 `dsh.client` + `exports["./client"]`。
 - 注册进 `packages/bundle/web-app/cordis.patch.yml` 的 `dsh.client` roster；`__DSH_BOOT__` 入口图由 `apps/web/vite.config.ts` 注入。
 - 参考实现：`packages/client/ui-workspace`、`ui-goal`、`ui-input-trigger`。
-- **缺口确认**：apps/web 无任何 getUserMedia/AudioContext/WebSocket/RTCPeerConnection 代码——语音采集与播放需从零在客户端插件里建。
+- 相邻 DSH 工作区已新增 `@deepseek-ai/dsh-client-ui-voice`：Host 半边通过 `webServer` 和 `credentials` 托管同源 relay，浏览器半边完成 getUserMedia→PCM16/16kHz/20ms 分帧、24kHz 连续回放，并注册输入区按钮与活动状态条。最终用户转写会固定投递到启动语音的 session，经该 scope 的 `conversation.send()` 进入现有 Agent、工具、记忆和持久历史；中间转写与豆包助手文本不进入 Agent，页面切换也不会改变本次语音目标。首版通过 12 项包内测试、Host/Client 全库构建、Web 生产构建和 2 项 Playwright 真实组装测试。Agent 回复与工具进度尚未合成回语音；Jarvis 粒子界面及 sherpa-onnx 唤醒/麦克风互斥协调层也尚未平移，仍需模型资产与真实关键词验收。

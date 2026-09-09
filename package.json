@@ -10,6 +10,8 @@
     "prebuild": "npm run wake:build",
     "build": "tauri build",
     "build:windows": "tauri build --bundles nsis",
+    "voice:dev": "vite --config voice-contract/vite.config.mjs",
+    "voice:build": "vite build --config voice-contract/vite.config.mjs",
     "web:dev": "vite",
     "web:build": "tsc && vite build",
     "test": "node --test \"tests/**/*.test.mjs\"",

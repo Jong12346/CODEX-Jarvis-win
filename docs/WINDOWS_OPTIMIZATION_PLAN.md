@@ -397,7 +397,7 @@ npm run build:windows
 | 4 | 现有唤醒增强和离线关键词引擎评估/接入 | 待开始 | 中英文实机命中记录 |
 | 5 | 后端持久化、首次启动向导、托盘和快捷键 | 待开始 | 升级迁移和恢复测试 |
 | 6 | 模块化、安装回归、签名和发布收尾 | 待开始 | Windows 发布验收报告 |
-| 7 | 语音与 Agent Provider 可插拔（国人友好版，设计见 §11 与 `docs/cn-friendly/PROVIDER_DESIGN.md`） | 契约测试暂存待评审（§11.3 步骤 2） | `tests/contract/voice_provider.rs` 17 项契约经影子实现自证 17/17 绿（修复 2 处契约缺陷 + 冻结稳定错误码）+ 符号就位后入 `src-tauri/tests/` + Codex 适配器零回归 + 豆包 Realtime 实机验收 |
+| 7 | 语音与 Agent Provider 可插拔（国人友好版，设计见 §11 与 `docs/cn-friendly/PROVIDER_DESIGN.md`） | DSH 语音 UI 插件及最终转写 Agent 衔接已实现，语音结果回流进行中 | `voice-contract/` 已含统一事件、豆包旧版/duplex 会话、浏览器编排、可启动 relay、粒子联调页、PCM/WAV 工具，以及 sherpa-onnx WASM 装载与麦克风互斥协调层，当前脏树 106 项测试与浏览器构建全绿；WAV 完整回路及真实 Chrome 的在线 relay、麦克风、回复事件、静音控制和两轮 STOP/重连已通过。相邻 DSH 工作区的 `@deepseek-ai/dsh-client-ui-voice` 已让最终用户转写进入启动语音的同一 DSH session，并通过 12 项包内测试、Host/Client 全库构建、Web 生产构建和 2 项 Playwright 真实组装测试；20 轮压力测试、sherpa 模型资产/真实唤醒、Agent 回复与工具进度合成回语音仍待验收 |
 
 ## 14. 最终完成定义
 
@@ -415,4 +415,3 @@ npm run build:windows
 - 发布文件不包含个人绝对路径、凭据、私密信息或未说明的第三方模型。
 - 最终报告列出改动、测试证据、人工验证、已知限制、签名状态和产物位置。
 - 若面向国内分发：语音与 Agent 的 Provider 契约落地（对外一层、对内三层），Codex 适配器搬迁零回归，至少一个国内厂商适配器通过契约测试与实机验收。
-

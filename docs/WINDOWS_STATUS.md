@@ -2,6 +2,20 @@
 
 验证环境：Windows 11 x64，Node.js 20+，Rust stable MSVC，Tauri 2，WebView2。
 
+## 当前未提交豆包 PoC 验证（2026-09-08）
+
+- `voice-contract` 当前脏树执行 `npm test`：106/106 通过；覆盖 WAV 严格解析与响度测量、指定文本播报、“结束 ASR → 静音保活”、Duplex 浏览器编排、本地 relay 鉴权转发、浏览器音频分帧/回放调度，以及唤醒/实时对话麦克风交接。
+- 当前脏树已实跑 `run-conversation.bat`：收到 PCM16/24kHz/单声道音频，时长 2671ms，peak 27566、RMS 5024.467、无削波，随后收到 `session.closed`；PCM 输出配置和指定文本播报链路通过，内容与听感仍需人工试听。
+- 本次服务端没有发 `response.output_text`。官方将 `speech_text_buffer.commit` 定义为“打招呼/指定文本播报”，只要求 TTS 音频；原自检把 Chat 文本列为必需条件属于假失败，当前脏树已修正。
+- 三个 `run-*.bat` 原有 PowerShell 路径包含隐藏回车字符；当前脏树已改为真实反斜杠，并通过字节级检查。两个在线脚本均已通过用户掩码输入豆包 Key 实跑。
+- 播报自检仅在有效幅度 PCM 音频和 `session.closed` 均出现时成功；音频输入自检要求非空 ASR 转写、模型文本回复、有效幅度音频和优雅关闭。两者与 `DoubaoDuplexSession` 共用会话载荷，避免配置漂移。
+- 音频输入复测已通过完整回路：输入 WAV 转成 PCM16/16kHz/单声道后，服务端确认音频提交，最终 ASR 为“你好，请介绍一下你自己。”，随后收到模型文本、PCM16/24kHz/单声道回复音频和 `response.done`，并优雅关闭会话。输出音频时长 12892ms，peak 30557、RMS 5655.945、无削波；内容与听感仍需人工试听。
+- 本地 relay 已落成可启动服务：仅监听回环地址、限制本地浏览器 Origin、从进程环境注入单 `X-Api-Key`，并用本地伪上游验证文本/二进制帧类型和拒绝远程 Origin。
+- 用户已在真实 Chrome 中完成浏览器联调：页面通过 `127.0.0.1:1421` 连接本地 relay 与 Doubao Duplex，浏览器麦克风权限、在线 relay、回复事件、mute 控制和粒子界面均正常。随后连续完成两轮“建立会话 → 模型回复 → STOP”，页面两次回到“已停止”，没有旧会话或自动重连复活；20 轮压力验收仍待执行。
+- 现有 Jarvis 头盔与粒子视觉已迁入联调页，语音状态驱动成形、监听、回复、静音、关闭和错误配色，麦克风/扬声器电平驱动粒子强度；`npm run voice:build` 构建 13 个模块成功，并用独立本地端口完成无凭据截图检查。
+- 浏览器唤醒接入层已实现：探测本地 sherpa-onnx 资产、加载官方 WASM KWS 包装器、16kHz 采集与重采样、重复命中抑制，并确保唤醒引擎释放麦克风后才启动豆包、豆包停止后才重新布防。仓库未内置模型/WASM 二进制；真实关键词命中仍待完成官方资产构建、许可证记录和实机测试。
+- DSH 相邻工作区已实现 `@deepseek-ai/dsh-client-ui-voice` 首版：Host 使用 `webServer` + `credentials` 提供同源配置与鉴权 relay，浏览器在会话输入区注册语音按钮和活动状态条。API Key 只在每次上游连接时由 Host 解析。每条最终用户转写现通过 scope 固定的 `conversation.send()` 进入启动语音的同一 DSH session，沿用该会话的 Agent、模型、工具、记忆和持久历史，并且不会覆盖输入框草稿。插件 12 项测试、Host/Client 全库构建、Web 前端生产构建及 2 项真实 Playwright 组装测试均通过；Agent 回复与工具进度尚未合成回语音，离线唤醒也尚未平移。
+
 ## 已通过
 
 - `npm ci`

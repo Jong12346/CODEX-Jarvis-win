@@ -33,6 +33,7 @@ test('session create carries model, audio config and voice', () => {
   assert.equal(msg.session.audio.output.voice, 'zh_female_vv_jupiter_bigtts')
   // 官方：输出 PCM 需在 extension.tts.audio_config 配置
   assert.deepEqual(msg.session.extension.tts.audio_config, { channel: 1, format: 'pcm_s16le', sample_rate: 24000 })
+  assert.equal(msg.session.extension.tts.speaker, 'zh_female_vv_jupiter_bigtts')
 })
 
 test('session.created activates and records session id', () => {
@@ -105,6 +106,16 @@ test('sendAudio base64-encodes into input_audio_buffer.append', () => {
   assert.equal(msg.audio, Buffer.from([0x00, 0x10]).toString('base64'))
 })
 
+test('sendText uses the documented specified-speech event', () => {
+  const s = setup()
+  s.session.onSocketOpen(s.sock)
+  s.session.onMessage(serverEvent('session.created', { session: { id: 'x' } }))
+  s.session.sendText('开始执行任务')
+  const msg = JSON.parse(s.sock.sent[1])
+  assert.equal(msg.type, 'speech_text_buffer.commit')
+  assert.equal(msg.text, '开始执行任务')
+})
+
 test('function call output is returned via conversation.item.create role=tool', () => {
   const s = setup()
   s.session.onSocketOpen(s.sock)
@@ -139,4 +150,16 @@ test('mute and unmute keep the full-duplex uplink alive', () => {
   s.session.unmute()
   assert.equal(JSON.parse(s.sock.sent[1]).type, 'input_audio_mute.commit')
   assert.equal(JSON.parse(s.sock.sent[2]).type, 'input_audio_unmute.commit')
+})
+
+test('finished file input ends ASR before entering the muted keepalive state', () => {
+  const s = setup()
+  s.session.onSocketOpen(s.sock)
+  s.session.onMessage(serverEvent('session.created', { session: { id: 'x' } }))
+  s.session.commitAudio()
+  s.session.mute()
+  assert.deepEqual(s.sock.sent.slice(1).map((text) => JSON.parse(text).type), [
+    'input_audio_buffer.commit',
+    'input_audio_mute.commit',
+  ])
 })

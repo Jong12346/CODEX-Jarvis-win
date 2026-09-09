@@ -1,15 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { DoubaoRelay, type RelayEnd, type RelayHandlers, type UpstreamFactory } from './relay.ts'
+import { DoubaoRelay, type RelayData, type RelayEnd, type RelayHandlers, type UpstreamFactory } from './relay.ts'
 
 class FakeEnd implements RelayEnd {
-  sent: Uint8Array[] = []
+  sent: RelayData[] = []
   closed = false
   private handlers: RelayHandlers | null = null
-  send(data: Uint8Array): void { this.sent.push(data) }
+  send(data: RelayData): void { this.sent.push(data) }
   close(): void { this.closed = true; this.handlers?.onClose() }
   setHandlers(handlers: RelayHandlers): void { this.handlers = handlers }
-  emit(data: Uint8Array): void { this.handlers?.onMessage(data) }
+  emit(data: RelayData): void { this.handlers?.onMessage(data) }
   emitClose(): void { this.handlers?.onClose() }
 }
 
@@ -44,11 +44,26 @@ test('bytes flow both ways between browser and upstream', () => {
 
   const audio = new Uint8Array([0x00, 0x10])
   browser.emit(audio)
+  assert.ok(upstream.sent[0] instanceof Uint8Array)
   assert.deepEqual([...upstream.sent[0]], [...audio])
 
   const tts = new Uint8Array([0xff, 0xee])
   upstream.emit(tts)
+  assert.ok(browser.sent[0] instanceof Uint8Array)
   assert.deepEqual([...browser.sent[0]], [...tts])
+})
+
+test('text frames keep their type in both directions', () => {
+  const upstream = new FakeEnd()
+  const relay = new DoubaoRelay(() => upstream, 'wss://example', {})
+  const browser = new FakeEnd()
+  relay.attach(browser)
+
+  browser.emit('{"type":"session.create"}')
+  assert.equal(upstream.sent[0], '{"type":"session.create"}')
+
+  upstream.emit('{"type":"session.created"}')
+  assert.equal(browser.sent[0], '{"type":"session.created"}')
 })
 
 test('browser close tears down upstream', () => {

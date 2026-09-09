@@ -14,7 +14,8 @@
 - 用户已在真实 Chrome 中完成浏览器联调：页面通过 `127.0.0.1:1421` 连接本地 relay 与 Doubao Duplex，浏览器麦克风权限、在线 relay、回复事件、mute 控制和粒子界面均正常。随后连续完成两轮“建立会话 → 模型回复 → STOP”，页面两次回到“已停止”，没有旧会话或自动重连复活；20 轮压力验收仍待执行。
 - 现有 Jarvis 头盔与粒子视觉已迁入联调页，语音状态驱动成形、监听、回复、静音、关闭和错误配色，麦克风/扬声器电平驱动粒子强度；`npm run voice:build` 构建 13 个模块成功，并用独立本地端口完成无凭据截图检查。
 - 浏览器唤醒接入层已实现：探测本地 sherpa-onnx 资产、加载官方 WASM KWS 包装器、16kHz 采集与重采样、重复命中抑制，并确保唤醒引擎释放麦克风后才启动豆包、豆包停止后才重新布防。仓库未内置模型/WASM 二进制；真实关键词命中仍待完成官方资产构建、许可证记录和实机测试。
-- DSH 相邻工作区已实现 `@deepseek-ai/dsh-client-ui-voice` 首版：Host 使用 `webServer` + `credentials` 提供同源配置与鉴权 relay，浏览器在会话输入区注册语音按钮和活动状态条。API Key 只在每次上游连接时由 Host 解析。每条最终用户转写现通过 scope 固定的 `conversation.send()` 进入启动语音的同一 DSH session，沿用该会话的 Agent、模型、工具、记忆和持久历史，并且不会覆盖输入框草稿。插件 12 项测试、Host/Client 全库构建、Web 前端生产构建及 2 项真实 Playwright 组装测试均通过；Agent 回复与工具进度尚未合成回语音，离线唤醒也尚未平移。
+- DSH 相邻工作区已实现 `@deepseek-ai/dsh-client-ui-voice`：Host 使用 `webServer` + `credentials` 提供同源配置与鉴权 relay，浏览器在会话输入区注册语音按钮和活动状态条。API Key 只在每次上游连接时由 Host 解析。每条最终用户转写通过 scope 固定的 `conversation.send()` 进入启动语音的同一 DSH session，沿用该会话的 Agent、模型、工具、记忆和持久历史，并且不会覆盖输入框草稿。最终转写会先取消豆包自主回复；DSH 工具开始、完成/失败与最终 Agent 回复会按序通过指定文本播报回流 Duplex。插件 17 项包内测试、Host/Client 类型检查、包构建、Web 前端生产构建及 2 项 Playwright 组装测试均通过；真实豆包听感和离线唤醒平移仍待人工验收。
+- 用户已在真实 DSH Web 与豆包 Duplex 链路完成“浏览器麦克风 → 实时转写 → 当前 DSH session → Agent 最终回复 → 指定文本语音播放”验收。实机暴露的静音结束语音问题已修复：静音先发送 `input_audio_buffer.commit` 再发送 `input_audio_mute.commit`，并在服务端缺少 `transcription.completed` 时用最后的完整 ASR 假设提交一次、抑制迟到的重复完成事件。语音包测试 17/17、Client 类型检查和相关 oxlint 均通过；工具进度播报仍只有自动化证据。
 
 ## 已通过
 

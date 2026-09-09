@@ -1,6 +1,6 @@
 # Jarvis → DSH 语音插件：阶段一设计
 
-- 状态：DSH UI 插件首版 v0.5（Host relay、浏览器控制与最终转写 Agent 投递已组装，Agent 结果语音回流及离线唤醒待完成）
+- 状态：DSH UI 插件 v0.6（Host relay、浏览器控制、最终转写 Agent 投递与 Agent 结果语音回流已组装，离线唤醒待完成）
 - 上游依据：docs/cn-friendly/PROVIDER_DESIGN.md 的 D1–D4 决策，载体从 Rust trait 平移为 DSH 插件接口
 - 目标：把 Jarvis 演进为 DSH 生态的语音插件，记忆与 provider 解耦，语音交互优先
 
@@ -39,7 +39,7 @@ Jarvis 从独立 Tauri app 演进为 DSH 生态插件，分两层：
 2. **doubao realtime adapter**：WebSocket + PCM16，官方 Realtime API；先实机验证"会话内工具调用"再定一体化/分离模式。
 3. **客户端 UI 插件**：getUserMedia 采集 + 音频播放 + 唤醒/麦克风按钮 + 事件渲染。
 4. **豆包 PoC 跑通**：唤醒→豆包→对话→STOP。
-5. **AgentBackend 衔接**：最终用户 transcript 已通过现有 scope 会话入口进入同一 Agent；Agent 回复与工具进度回流语音待完成。
+5. **AgentBackend 衔接**：最终用户 transcript 通过现有 scope 会话入口进入同一 Agent；豆包自主回复会被取消，工具开始/完成/失败与最终 Agent 文本通过指定文本播报按序回流。
 6. **记忆可移植验收**：换 provider，记忆/会话/thread 不丢（`ctx.storage` 已保障，验证即可）。
 
 ## 5. 与旧 Rust 契约的关系
@@ -65,4 +65,4 @@ Jarvis 从独立 Tauri app 演进为 DSH 生态插件，分两层：
 - 每个客户端插件一个包：node 半边 `src/index.ts`（`apply`，可为空，仅为出现在 host cordis.yml）、浏览器半边 `src/client/index.ts`、package.json 声明 `dsh.client` + `exports["./client"]`。
 - 注册进 `packages/bundle/web-app/cordis.patch.yml` 的 `dsh.client` roster；`__DSH_BOOT__` 入口图由 `apps/web/vite.config.ts` 注入。
 - 参考实现：`packages/client/ui-workspace`、`ui-goal`、`ui-input-trigger`。
-- 相邻 DSH 工作区已新增 `@deepseek-ai/dsh-client-ui-voice`：Host 半边通过 `webServer` 和 `credentials` 托管同源 relay，浏览器半边完成 getUserMedia→PCM16/16kHz/20ms 分帧、24kHz 连续回放，并注册输入区按钮与活动状态条。最终用户转写会固定投递到启动语音的 session，经该 scope 的 `conversation.send()` 进入现有 Agent、工具、记忆和持久历史；中间转写与豆包助手文本不进入 Agent，页面切换也不会改变本次语音目标。首版通过 12 项包内测试、Host/Client 全库构建、Web 生产构建和 2 项 Playwright 真实组装测试。Agent 回复与工具进度尚未合成回语音；Jarvis 粒子界面及 sherpa-onnx 唤醒/麦克风互斥协调层也尚未平移，仍需模型资产与真实关键词验收。
+- 相邻 DSH 工作区已新增 `@deepseek-ai/dsh-client-ui-voice`：Host 半边通过 `webServer` 和 `credentials` 托管同源 relay，浏览器半边完成 getUserMedia→PCM16/16kHz/20ms 分帧、24kHz 连续回放，并注册输入区按钮与活动状态条。最终用户转写固定投递到启动语音的 session，经该 scope 的 `conversation.send()` 进入现有 Agent、工具、记忆和持久历史；中间转写与豆包助手文本不进入 Agent，页面切换也不会改变本次语音目标。完整转写到达时会取消豆包自主回复；固定会话的工具开始、工具完成/失败和最终 Agent 文本通过串行 `speech_text_buffer.commit` 回流语音，原始工具输出不会朗读。自动化验证覆盖上述编排；真实 DSH Web 已验收麦克风转写、当前会话 Agent 回答及最终回答语音播放。静音显式提交 ASR 缓冲区，并在上游缺少最终转写事件时提交最后的完整识别假设。Jarvis 粒子界面及 sherpa-onnx 唤醒/麦克风互斥协调层尚未平移，仍需模型资产、真实关键词和工具进度实机播报验收。

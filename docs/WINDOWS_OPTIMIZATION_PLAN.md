@@ -397,7 +397,7 @@ npm run build:windows
 | 4 | 现有唤醒增强和离线关键词引擎评估/接入 | 待开始 | 中英文实机命中记录 |
 | 5 | 后端持久化、首次启动向导、托盘和快捷键 | 待开始 | 升级迁移和恢复测试 |
 | 6 | 模块化、安装回归、签名和发布收尾 | 待开始 | Windows 发布验收报告 |
-| 7 | 语音与 Agent Provider 可插拔（国人友好版，设计见 §11 与 `docs/cn-friendly/PROVIDER_DESIGN.md`） | DSH 语音 UI 插件及最终转写 Agent 衔接已实现，语音结果回流进行中 | `voice-contract/` 已含统一事件、豆包旧版/duplex 会话、浏览器编排、可启动 relay、粒子联调页、PCM/WAV 工具，以及 sherpa-onnx WASM 装载与麦克风互斥协调层，当前脏树 106 项测试与浏览器构建全绿；WAV 完整回路及真实 Chrome 的在线 relay、麦克风、回复事件、静音控制和两轮 STOP/重连已通过。相邻 DSH 工作区的 `@deepseek-ai/dsh-client-ui-voice` 已让最终用户转写进入启动语音的同一 DSH session，并通过 12 项包内测试、Host/Client 全库构建、Web 生产构建和 2 项 Playwright 真实组装测试；20 轮压力测试、sherpa 模型资产/真实唤醒、Agent 回复与工具进度合成回语音仍待验收 |
+| 7 | 语音与 Agent Provider 可插拔（国人友好版，设计见 §11 与 `docs/cn-friendly/PROVIDER_DESIGN.md`） | DSH 语音 UI、最终转写 Agent 衔接及 Agent 结果语音回流已实现 | `voice-contract/` 已含统一事件、豆包旧版/duplex 会话、浏览器编排、可启动 relay、粒子联调页、PCM/WAV 工具，以及 sherpa-onnx WASM 装载与麦克风互斥协调层，当前脏树 106 项测试与浏览器构建全绿；WAV 完整回路及真实 Chrome 的在线 relay、麦克风、回复事件、静音控制和两轮 STOP/重连已通过。相邻 DSH 工作区的 `@deepseek-ai/dsh-client-ui-voice` 已让最终用户转写进入启动语音的同一 DSH session，取消豆包自主回复，并将工具生命周期和最终 Agent 文本按序送回 Duplex 指定文本语音；自动化验证通过，真实 DSH Web 的麦克风转写、Agent 回答及最终回答语音播放也已验收。20 轮压力测试、sherpa 模型资产/真实唤醒及工具进度实机播报仍待验收 |
 
 ## 14. 最终完成定义
 

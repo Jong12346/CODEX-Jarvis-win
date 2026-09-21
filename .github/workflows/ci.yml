@@ -13,13 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: Verify (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-14, windows-latest]
-    runs-on: ${{ matrix.os }}
+  verify-windows:
+    name: Verify (windows-latest)
+    runs-on: windows-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -32,4 +28,25 @@ jobs:
           components: clippy,rustfmt
       - run: npm ci
       - run: npm run check
-      - run: npm run build
+      - name: Build Windows NSIS installer
+        run: npm run build:windows
+      - name: Generate installer checksum
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem 'src-tauri/target/release/bundle/nsis/*-setup.exe' |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $installer) {
+            throw 'Windows NSIS installer was not generated.'
+          }
+          $hash = Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256
+          "$($hash.Hash.ToLowerInvariant())  $($installer.Name)" |
+            Set-Content -LiteralPath "$($installer.FullName).sha256" -Encoding ascii
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v6
+        with:
+          name: jarvis-codex-windows-nsis
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe.sha256
+          if-no-files-found: error

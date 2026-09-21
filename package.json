@@ -10,10 +10,12 @@
     "prebuild": "npm run wake:build",
     "build": "tauri build",
     "build:windows": "tauri build --bundles nsis",
+    "voice:dev": "vite --config voice-contract/vite.config.mjs",
+    "voice:build": "vite build --config voice-contract/vite.config.mjs",
     "web:dev": "vite",
     "web:build": "tsc && vite build",
-    "test": "node --test tests/*.test.mjs",
-    "check": "npm run wake:build && npm test && npm run web:build && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings"
+    "test": "node --test \"tests/**/*.test.mjs\"",
+    "check": "npm run wake:build && npm test && npm run web:build && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1"

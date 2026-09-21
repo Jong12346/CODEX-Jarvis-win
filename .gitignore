@@ -1,5 +1,6 @@
 node_modules/
 dist/
+/voice-contract/lib/
 /.codex-publish-work-*/
 src-tauri/target/
 src-tauri/gen/
@@ -13,3 +14,5 @@ runtime/*
 .env.*
 !.env.example
 *.dmg
+docs/CURRENT_HANDOFF.md
+.tmp/

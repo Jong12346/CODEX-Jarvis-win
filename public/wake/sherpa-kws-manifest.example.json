@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "wrapperScript": "sherpa-onnx-kws.js",
+  "runtimeScript": "sherpa-onnx-wasm-kws-main.js",
+  "sampleRate": 16000,
+  "recognizerConfig": {
+    "featConfig": {
+      "samplingRate": 16000,
+      "featureDim": 80
+    },
+    "modelConfig": {
+      "transducer": {
+        "encoder": "./encoder.onnx",
+        "decoder": "./decoder.onnx",
+        "joiner": "./joiner.onnx"
+      },
+      "tokens": "./tokens.txt",
+      "provider": "cpu",
+      "modelType": "",
+      "numThreads": 1,
+      "debug": 0,
+      "modelingUnit": "cjkchar",
+      "bpeVocab": ""
+    },
+    "maxActivePaths": 4,
+    "numTrailingBlanks": 1,
+    "keywordsScore": 1,
+    "keywordsThreshold": 0.25,
+    "keywords": "REPLACE_WITH_MODEL_TOKEN_SEQUENCE @Jarvis"
+  }
+}

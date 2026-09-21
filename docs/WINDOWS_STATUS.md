@@ -2,6 +2,31 @@
 
 验证环境：Windows 11 x64，Node.js 20+，Rust stable MSVC，Tauri 2，WebView2。
 
+## 阶段归档（2026-09-21）
+
+- Jarvis 的 Windows 优化和浏览器语音 PoC 保存在 `agent/windows-voice-polish` 分支；实际 DSH 语音插件保存在独立仓库 [Jong12346/deepseek-harness-studio](https://github.com/Jong12346/deepseek-harness-studio) 的 `main` 分支，源码路径为 `packages/client/ui-voice`。
+- 豆包负责实时对话，通过 `delegate_to_dsh` 委派项目操作；GitHub 页面打开流程已获用户实机确认。
+- 已补齐真实转写开始、服务端取消、迟到 PCM 丢弃和旧回复隔离；用户确认讲话已能被打断。蓝牙耳机播放回答仍有哔声，但原始 WAV 对照音频没有哔声，根因尚未确认。
+- 已提供静音时选择输入设备、恢复时精确使用所选麦克风的功能；“电脑麦克风阵列 + 蓝牙耳机播放”组合尚待用户实机验收，不能标记为哔声已修复。
+- 本次归档检查：Jarvis `npm test` 17/17 通过，`npm run voice:build` 通过；DSH 语音包 26/26、浏览器语音定向测试 2/2 通过，修改的双语文档配对通过。
+- DSH 全量 `doc-sync` 未通过：包括远端基线也未包含的 `docs/` 源文件缺失及目录生成检查问题。全量文档门禁和历史非语音测试失败不视为已解决；当前不是正式发布验收。
+- 离线唤醒资产、真实唤醒与麦克风交接、20 轮启停压力测试仍待完成。以下章节保留历史验证记录，当前结论以本节和 DSH 插件 README 为准。
+
+## 当前未提交豆包 PoC 验证（2026-09-08）
+
+- `voice-contract` 当前脏树执行 `npm test`：106/106 通过；覆盖 WAV 严格解析与响度测量、指定文本播报、“结束 ASR → 静音保活”、Duplex 浏览器编排、本地 relay 鉴权转发、浏览器音频分帧/回放调度，以及唤醒/实时对话麦克风交接。
+- 当前脏树已实跑 `run-conversation.bat`：收到 PCM16/24kHz/单声道音频，时长 2671ms，peak 27566、RMS 5024.467、无削波，随后收到 `session.closed`；PCM 输出配置和指定文本播报链路通过，内容与听感仍需人工试听。
+- 本次服务端没有发 `response.output_text`。官方将 `speech_text_buffer.commit` 定义为“打招呼/指定文本播报”，只要求 TTS 音频；原自检把 Chat 文本列为必需条件属于假失败，当前脏树已修正。
+- 三个 `run-*.bat` 原有 PowerShell 路径包含隐藏回车字符；当前脏树已改为真实反斜杠，并通过字节级检查。两个在线脚本均已通过用户掩码输入豆包 Key 实跑。
+- 播报自检仅在有效幅度 PCM 音频和 `session.closed` 均出现时成功；音频输入自检要求非空 ASR 转写、模型文本回复、有效幅度音频和优雅关闭。两者与 `DoubaoDuplexSession` 共用会话载荷，避免配置漂移。
+- 音频输入复测已通过完整回路：输入 WAV 转成 PCM16/16kHz/单声道后，服务端确认音频提交，最终 ASR 为“你好，请介绍一下你自己。”，随后收到模型文本、PCM16/24kHz/单声道回复音频和 `response.done`，并优雅关闭会话。输出音频时长 12892ms，peak 30557、RMS 5655.945、无削波；内容与听感仍需人工试听。
+- 本地 relay 已落成可启动服务：仅监听回环地址、限制本地浏览器 Origin、从进程环境注入单 `X-Api-Key`，并用本地伪上游验证文本/二进制帧类型和拒绝远程 Origin。
+- 用户已在真实 Chrome 中完成浏览器联调：页面通过 `127.0.0.1:1421` 连接本地 relay 与 Doubao Duplex，浏览器麦克风权限、在线 relay、回复事件、mute 控制和粒子界面均正常。随后连续完成两轮“建立会话 → 模型回复 → STOP”，页面两次回到“已停止”，没有旧会话或自动重连复活；20 轮压力验收仍待执行。
+- 现有 Jarvis 头盔与粒子视觉已迁入联调页，语音状态驱动成形、监听、回复、静音、关闭和错误配色，麦克风/扬声器电平驱动粒子强度；`npm run voice:build` 构建 13 个模块成功，并用独立本地端口完成无凭据截图检查。
+- 浏览器唤醒接入层已实现：探测本地 sherpa-onnx 资产、加载官方 WASM KWS 包装器、16kHz 采集与重采样、重复命中抑制，并确保唤醒引擎释放麦克风后才启动豆包、豆包停止后才重新布防。仓库未内置模型/WASM 二进制；真实关键词命中仍待完成官方资产构建、许可证记录和实机测试。
+- DSH 相邻工作区已实现 `@deepseek-ai/dsh-client-ui-voice`：Host 使用 `webServer` + `credentials` 提供同源配置与鉴权 relay，浏览器在会话输入区注册语音按钮和活动状态条。API Key 只在每次上游连接时由 Host 解析。每条最终用户转写通过 scope 固定的 `conversation.send()` 进入启动语音的同一 DSH session，沿用该会话的 Agent、模型、工具、记忆和持久历史，并且不会覆盖输入框草稿。最终转写会先取消豆包自主回复；DSH 工具开始、完成/失败与最终 Agent 回复会按序通过指定文本播报回流 Duplex。插件 17 项包内测试、Host/Client 类型检查、包构建、Web 前端生产构建及 2 项 Playwright 组装测试均通过；真实豆包听感和离线唤醒平移仍待人工验收。
+- 用户已在真实 DSH Web 与豆包 Duplex 链路完成“浏览器麦克风 → 实时转写 → 当前 DSH session → Agent 最终回复 → 指定文本语音播放”验收。实机暴露的静音结束语音问题已修复：静音先发送 `input_audio_buffer.commit` 再发送 `input_audio_mute.commit`，并在服务端缺少 `transcription.completed` 时用最后的完整 ASR 假设提交一次、抑制迟到的重复完成事件。语音包测试 17/17、Client 类型检查和相关 oxlint 均通过；工具进度播报仍只有自动化证据。
+
 ## 已通过
 
 - `npm ci`
@@ -23,7 +48,7 @@
 - Windows“已安装的应用”注册项指向用户安装目录及其卸载器
 - 已安装版本从用户安装目录冷启动，窗口标题、前台句柄和响应状态正常
 - 单实例实机验证：第二次启动自动退出并唤起原窗口，只保留一个 Jarvis runtime
-- 主程序和 Windows 唤醒器均为 Windows GUI PE，release 启动不再出现日志控制台
+- 主程序和 Windows 唤醒器均为 Windows GUI PE；npm Codex app-server 使用 `CREATE_NO_WINDOW`，release/Voice 启动不再出现 Windows Terminal 日志窗口
 - Voice 对连接重置、缺少 TLS closing handshake 和超时进行最多三次递增退避重连；STOP 会抑制重连
 - 目标中文路径立即生效；文字任务在该目录读取 `package.json` 并返回项目名 `jarvis-codex`
 - Voice transcript、Voice 内文字任务、工具调用和完成事件进入同一个 Codex thread

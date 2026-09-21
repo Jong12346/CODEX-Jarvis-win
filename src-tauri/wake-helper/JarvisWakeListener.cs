@@ -3,22 +3,19 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Diagnostics;
 using System.Speech.Recognition;
 using System.Text;
 using System.Threading;
 
 internal static class JarvisWakeListener
 {
-    private static readonly string[] WakePhrases =
+            private static readonly string[] WakePhrases =
     {
         "hey jarvis",
         "hi jarvis",
         "jarvis",
-        "嗨 jarvis",
-        "嘿 jarvis",
-        "嗨 贾维斯",
-        "嘿 贾维斯",
-        "贾维斯",
+        "嗨 Jarvis",
     };
 
     private static readonly ManualResetEvent Finished = new ManualResetEvent(false);
@@ -29,7 +26,38 @@ internal static class JarvisWakeListener
     public static int Main(string[] args)
     {
         string eventFile = Argument(args, "--event-file");
+        string controlFile = Argument(args, "--control-file");
         bool testWake = args.Any(value => value == "--test-wake");
+        bool testRelease = args.Any(value => value == "--test-release");
+        int parentPid = 0;
+        int.TryParse(Argument(args, "--parent-pid"), out parentPid);
+        if (parentPid > 0)
+        {
+            // If the Jarvis host dies without a chance to kill this helper,
+            // exit on our own: an orphaned helper keeps the microphone and
+            // locks JarvisWakeListener.exe so the next build cannot overwrite it.
+            Thread watcher = new Thread(() =>
+            {
+                while (true)
+                {
+                    Thread.Sleep(1000);
+                    try
+                    {
+                        using (Process process = Process.GetProcessById(parentPid))
+                        {
+                            if (process.HasExited) throw new InvalidOperationException("parent exited");
+                        }
+                    }
+                    catch
+                    {
+                        Emit("stopping", "reason", "parent_exit");
+                        Environment.Exit(2);
+                    }
+                }
+            });
+            watcher.IsBackground = true;
+            watcher.Start();
+        }
         try
         {
             if (!string.IsNullOrWhiteSpace(eventFile))
@@ -44,6 +72,19 @@ internal static class JarvisWakeListener
                 Emit("wake", "phrase", "test");
                 return 0;
             }
+            if (testRelease)
+            {
+                Emit("ready", "culture", "test");
+                WaitForRelease(controlFile);
+                Emit("stopping", "reason", "release");
+                Emit("microphoneReleased", "reason", "release");
+                return 6;
+            }
+            if (args.Any(value => value == "--probe-recognizer"))
+            {
+                // 诊断探针：只查询已安装的语音识别器，不启动音频设备。
+                return SelectRecognizer() == null ? 3 : 0;
+            }
 
             RecognizerInfo recognizerInfo = SelectRecognizer();
             if (recognizerInfo == null)
@@ -52,9 +93,13 @@ internal static class JarvisWakeListener
                 return 3;
             }
 
-            using (var recognizer = new SpeechRecognitionEngine(recognizerInfo.Id))
+            bool releaseRequested = false;
+            using (var recognizer = CreateRecognizer(recognizerInfo))
             {
-                LoadWakeGrammar(recognizer, recognizerInfo.Culture);
+                CultureInfo activeCulture = recognizer.RecognizerInfo == null
+                    ? recognizerInfo.Culture
+                    : recognizer.RecognizerInfo.Culture;
+                LoadWakeGrammar(recognizer, activeCulture);
                 recognizer.SpeechRecognized += OnSpeechRecognized;
                 recognizer.RecognizeCompleted += delegate { Finished.Set(); };
                 Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs eventArgs)
@@ -65,10 +110,24 @@ internal static class JarvisWakeListener
                 recognizer.SetInputToDefaultAudioDevice();
                 Emit("ready", "culture", recognizerInfo.Culture.Name);
                 recognizer.RecognizeAsync(RecognizeMode.Multiple);
-                Finished.WaitOne();
+                while (!Finished.WaitOne(120))
+                {
+                    if (ReleaseRequested(controlFile))
+                    {
+                        releaseRequested = true;
+                        Emit("stopping", "reason", "release");
+                        recognizer.RecognizeAsyncCancel();
+                        break;
+                    }
+                }
                 recognizer.RecognizeAsyncCancel();
             }
-            return Volatile.Read(ref woke) == 1 ? 0 : 2;
+            // 释放确认只能在识别器（音频设备）真正释放之后发出。
+            Emit(
+                "microphoneReleased",
+                "reason",
+                Volatile.Read(ref woke) == 1 ? "wake" : (releaseRequested ? "release" : "stop"));
+            return Volatile.Read(ref woke) == 1 ? 0 : (releaseRequested ? 6 : 2);
         }
         catch (UnauthorizedAccessException)
         {
@@ -84,6 +143,25 @@ internal static class JarvisWakeListener
         finally
         {
             if (eventWriter != null) eventWriter.Dispose();
+        }
+    }
+
+    private static void WaitForRelease(string controlFile)
+    {
+        while (!ReleaseRequested(controlFile)) Thread.Sleep(50);
+    }
+
+    private static bool ReleaseRequested(string controlFile)
+    {
+        if (string.IsNullOrWhiteSpace(controlFile)) return false;
+        try
+        {
+            return File.Exists(controlFile)
+                && File.ReadAllText(controlFile).Trim().Equals("release", StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -109,6 +187,29 @@ internal static class JarvisWakeListener
             ?? installed.FirstOrDefault(item => item.Culture.Name.StartsWith("zh", StringComparison.OrdinalIgnoreCase))
             ?? installed.FirstOrDefault(item => item.Culture.Name.StartsWith("en", StringComparison.OrdinalIgnoreCase))
             ?? installed.FirstOrDefault();
+    }
+
+    private static SpeechRecognitionEngine CreateRecognizer(RecognizerInfo preferred)
+    {
+        try
+        {
+            return new SpeechRecognitionEngine(preferred.Id);
+        }
+        catch
+        {
+            try
+            {
+                return new SpeechRecognitionEngine(preferred.Culture);
+            }
+            catch
+            {
+                // Some Windows installations enumerate a recognizer whose
+                // registry id cannot be bound (HRESULT 0x80050022), while the
+                // system default engine remains usable. Prefer a working local
+                // engine over disabling wake and Voice entirely.
+                return new SpeechRecognitionEngine();
+            }
+        }
     }
 
     private static void OnSpeechRecognized(object sender, SpeechRecognizedEventArgs eventArgs)

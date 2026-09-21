@@ -2,6 +2,16 @@
 
 验证环境：Windows 11 x64，Node.js 20+，Rust stable MSVC，Tauri 2，WebView2。
 
+## 阶段归档（2026-09-21）
+
+- Jarvis 的 Windows 优化和浏览器语音 PoC 保存在 `agent/windows-voice-polish` 分支；实际 DSH 语音插件保存在独立仓库 [Jong12346/deepseek-harness-studio](https://github.com/Jong12346/deepseek-harness-studio) 的 `main` 分支，源码路径为 `packages/client/ui-voice`。
+- 豆包负责实时对话，通过 `delegate_to_dsh` 委派项目操作；GitHub 页面打开流程已获用户实机确认。
+- 已补齐真实转写开始、服务端取消、迟到 PCM 丢弃和旧回复隔离；用户确认讲话已能被打断。蓝牙耳机播放回答仍有哔声，但原始 WAV 对照音频没有哔声，根因尚未确认。
+- 已提供静音时选择输入设备、恢复时精确使用所选麦克风的功能；“电脑麦克风阵列 + 蓝牙耳机播放”组合尚待用户实机验收，不能标记为哔声已修复。
+- 本次归档检查：Jarvis `npm test` 17/17 通过，`npm run voice:build` 通过；DSH 语音包 26/26、浏览器语音定向测试 2/2 通过，修改的双语文档配对通过。
+- DSH 全量 `doc-sync` 未通过：包括远端基线也未包含的 `docs/` 源文件缺失及目录生成检查问题。全量文档门禁和历史非语音测试失败不视为已解决；当前不是正式发布验收。
+- 离线唤醒资产、真实唤醒与麦克风交接、20 轮启停压力测试仍待完成。以下章节保留历史验证记录，当前结论以本节和 DSH 插件 README 为准。
+
 ## 当前未提交豆包 PoC 验证（2026-09-08）
 
 - `voice-contract` 当前脏树执行 `npm test`：106/106 通过；覆盖 WAV 严格解析与响度测量、指定文本播报、“结束 ASR → 静音保活”、Duplex 浏览器编排、本地 relay 鉴权转发、浏览器音频分帧/回放调度，以及唤醒/实时对话麦克风交接。
